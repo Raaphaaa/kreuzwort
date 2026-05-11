@@ -1,0 +1,262 @@
+sap.ui.define([], function () {
+  "use strict";
+
+  return class Dummy {
+    constructor(x, y, caller) {
+      this.x = x;
+      this.y = y;
+      this.generator = caller;
+
+      // Nur gesetzt wenn der Dummy wirklich ausgeprägt und aktiv ist.
+      this.shaped = false;
+      this.startX = null;
+      this.startY = null;
+      this.direction = null;
+      this.horizontal = null;
+      this.length = null;
+
+      this.possibilities = [];
+      this.invalidate();
+    }
+
+    invalidate() {
+      this.shaped = false;
+      this.startX = null;
+      this.startY = null;
+      this.direction = null;
+      this.horizontal = null;
+      this.length = null;
+      this._refreshPossibilities();
+    }
+
+    shape() {
+      // Takes the best possibility and sets length/direction accordingly
+      this.shaped = true;
+      let temp =
+        this.possibilities[
+          this.generator.getRandomInt(0, this.possibilities.length - 1)
+        ];
+      this.startX = this._getStartX(temp.direction);
+      this.startY = this._getStartY(temp.direction);
+      this.horizontal = this._getHorizontal(temp.direction);
+      this.direction = temp.direction;
+      this.length = temp.length;
+      this.generator.refreshGrid();
+    }
+
+    _refreshPossibilities() {
+      let directions = this._getValidDirections();
+      let that = this;
+
+      directions.forEach(function (direction) {
+        let lengths = that._getValidLengths(direction);
+        lengths.forEach(function (length) {
+          that.possibilities.push({
+            direction: direction,
+            length: length,
+          });
+        });
+      });
+    }
+
+    _getValidDirections() {
+      let directions = this._getDirections();
+      let validDirections = [];
+      let that = this;
+
+      directions.forEach(function (direction) {
+        if (that._validateDirection(direction)) {
+          validDirections.push(direction);
+        }
+      });
+      return validDirections;
+    }
+
+    _getDirections() {
+      let directions = [];
+      const gridData = this.generator.getGrid().getData();
+      let x = this.x;
+      let y = this.y;
+      if (
+        x > 0 &&
+        gridData[y][x - 1] &&
+        !gridData[y][x - 1].reserved &&
+        (gridData[y][x - 1].isEmpty || gridData[y][x - 1].isLetter)
+      ) {
+        // field to the left
+        directions.push("leftdown");
+      }
+      if (
+        x < 11 &&
+        gridData[y][x + 1] &&
+        !gridData[y][x + 1].reserved &&
+        (gridData[y][x + 1].isEmpty || gridData[y][x + 1].isLetter)
+      ) {
+        // field to the right
+        directions.push("right");
+        directions.push("rightdown");
+      }
+      if (
+        y > 0 &&
+        gridData[y - 1][x] &&
+        !gridData[y - 1][x].reserved &&
+        (gridData[y - 1][x].isEmpty || gridData[y - 1][x].isLetter)
+      ) {
+        // field above
+        directions.push("upright");
+      }
+      if (
+        y < 11 &&
+        gridData[y + 1][x] &&
+        !gridData[y + 1][x].reserved &&
+        (gridData[y + 1][x].isEmpty || gridData[y + 1][x].isLetter)
+      ) {
+        // field below
+        directions.push("down");
+        directions.push("downright");
+      }
+      return directions;
+    }
+
+    _validateDirection(direction) {
+      const gridData = this.generator.getGrid().getData();
+
+      let x = this._getStartX(direction);
+      let y = this._getStartY(direction);
+      let moveX = this._getMoveX(direction);
+      let moveY = this._getMoveY(direction);
+      let horizontal = this._getHorizontal(direction);
+
+      // check the field in front of the word. If it is a letter,
+      // starting a word at the current position is invalid
+      let previousX = x - moveX;
+      let previousY = y - moveY;
+      if (
+        gridData[previousY] &&
+        gridData[previousY][previousX] &&
+        !gridData[previousY][previousX].isEmpty &&
+        gridData[previousY][previousX].isLetter
+      ) {
+        return false;
+      }
+
+      // word would be placed parallel and directly at the top or left edge. This would block crucial
+      // fields for clues of future words
+      if ((x == 0 && moveY > 0) || (y == 0 && moveX > 0)) {
+        return false;
+      }
+
+      // check for an existing word in the same direction
+      if (
+        (horizontal && gridData[y][x].dummyHorizontal != null) ||
+        (!horizontal && gridData[y][x].dummyVertical != null)
+      ) {
+        return false;
+      }
+
+      return true;
+    }
+
+    _getValidLengths(direction) {
+      const gridData = this.generator.getGrid().getData();
+      let that = this;
+
+      let validLengths = [];
+      let length = 2;
+      let x = this._getStartX(direction);
+      let y = this._getStartY(direction);
+      let moveX = this._getMoveX(direction);
+      let moveY = this._getMoveY(direction);
+      while (length <= this.generator.getMaxLength()) {
+        x += moveX;
+        y += moveY;
+        // exceeding the gird or the field is reserved for a new clue
+        if (x >= this.width || y >= this.height || gridData[y][x].reserved) {
+          break;
+        }
+
+        let currentField = gridData[y][x];
+
+        // continue when the current field is empty or a letter
+        if (currentField.isEmpty || currentField.isLetter) {
+          // check, if the next field would be within the grid. IF so, that
+          // field has to be checked as well
+          if (x + moveX < this.width && y + moveY < this.height) {
+            let nextField = gridData[y + moveY][x + moveX];
+            // only if the next field is empty or a clue, a word can be placed up to the
+            // current field without issues. If it would be a letter(x), the word ending right
+            // in front of it would be invalid:
+            // | | | | | |
+            // |W|O|R|D|x|
+            // | | | | | |
+            if (nextField.isEmpty || (!nextField.isEmpty && nextField.isClue)) {
+              validLengths.push(length);
+            }
+          } else {
+            validLengths.push(length);
+          }
+        }
+        length++;
+      }
+      return validLengths;
+    }
+
+    _getStartX(direction) {
+      switch (direction) {
+        case "right":
+        case "rightdown":
+          return this.x + 1;
+        case "leftdown":
+          return this.x - 1;
+        default:
+          return this.x;
+      }
+    }
+
+    _getStartY(direction) {
+      switch (direction) {
+        case "upright":
+          return this.y - 1;
+        case "down":
+        case "downright":
+          return this.y + 1;
+        default:
+          return this.y;
+      }
+    }
+
+    _getHorizontal(direction) {
+      // returns true if the word would be placed horizontally, false if it would be placed vertically
+      switch (direction) {
+        case "downright":
+        case "upright":
+        case "right":
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    _getMoveX(direction) {
+      switch (direction) {
+        case "right":
+        case "downright":
+        case "upright":
+          return 1;
+        default:
+          return 0;
+      }
+    }
+
+    _getMoveY(direction) {
+      switch (direction) {
+        case "down":
+        case "rightdown":
+        case "leftdown":
+          return 1;
+        default:
+          return 0;
+      }
+    }
+  };
+});

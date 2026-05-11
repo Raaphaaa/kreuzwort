@@ -1,0 +1,72 @@
+<mvc:View controllerName="kreuzwort.kreuzwort.controller.KWR"
+    xmlns:mvc="sap.ui.core.mvc"
+    xmlns="sap.m"
+    xmlns:core="sap.ui.core">
+    <Page id="page" title="{i18n>title}">
+        <VBox>
+            <Button
+            text="Reset"
+            press=".reset"/>
+        </VBox>
+        <HBox>
+            <VBox
+                id="VBoxKWR"
+                class="cellSize cellHighlighting"
+                width="80%"
+                items="{
+                    path: 'grid>/',
+                    templateShareable: true
+                    }">
+                <items>
+                    <HBox
+                        fitContainer="true"
+                        items="{
+                            path: 'grid>',
+                            templateShareable: true
+                            }">
+                        <items>
+                            <Text
+                                class="arrows"
+                                text="">
+                                <customData>
+                                    <core:CustomData
+                                        key="isempty"
+                                        value="{= ${grid>isEmpty}.toString()}"
+                                        writeToDom="true" />
+                                    <core:CustomData
+                                        key="isletter"
+                                        value="{= ${grid>isLetter}.toString()}"
+                                        writeToDom="true" />
+                                        
+                                    <core:CustomData
+                                        key="hashorizontal"
+                                        value="{= ${grid>hasHorizontalWord}.toString()}"
+                                        writeToDom="true" />
+                                    <core:CustomData
+                                        key="hasvertical"
+                                        value="{= ${grid>hasVerticalWord}.toString()}"
+                                        writeToDom="true" />
+                                    
+                                    <core:CustomData
+                                        key="nextword"
+                                        value="{= ${grid>nextWordLocation} ? ${grid>reserved} ? 'reserved' : 'next' : ''}"
+                                        writeToDom="true" />
+                                    <core:CustomData
+                                        key="shownext"
+                                        value="{= ${settings>/showLocations}.toString()}"
+                                        writeToDom="true" />
+                                </customData>
+                            </Text>
+                        </items>
+                        <customData>
+                            <core:CustomData
+                                key="shownext"
+                                value="{= ${settings>/showLocations}.toString()}"
+                                writeToDom="true" />
+                        </customData>
+                    </HBox>
+                </items>
+            </VBox>
+        </HBox>
+    </Page>
+</mvc:View>

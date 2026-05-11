@@ -1,0 +1,100 @@
+{
+  "_version": "1.76.0",
+  "sap.app": {
+    "id": "kreuzwort.kreuzwort",
+    "type": "application",
+    "i18n": "i18n/i18n.properties",
+    "applicationVersion": {
+      "version": "0.0.1"
+    },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "resources": "resources.json",
+    "sourceTemplate": {
+      "id": "@sap/generator-fiori:basic",
+      "version": "1.18.6",
+      "toolsId": "afd1a82f-f1a3-4413-8be9-e1689c125b5f"
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "icons": {
+      "icon": "",
+      "favIcon": "",
+      "phone": "",
+      "phone@2": "",
+      "tablet": "",
+      "tablet@2": ""
+    },
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.147.2",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {}
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "kreuzwort.kreuzwort.i18n.i18n"
+        }
+      },
+      "settings": {
+        "type": "sap.ui.model.json.JSONModel",
+        "uri": "./model/settings.json"
+      }
+    },
+    "resources": {
+      "css": [
+        {
+          "uri": "css/style.css"
+        }
+      ]
+    },
+    "routing": {
+      "config": {
+        "routerClass": "sap.m.routing.Router",
+        "controlAggregation": "pages",
+        "controlId": "app",
+        "transition": "slide",
+        "type": "View",
+        "viewType": "XML",
+        "path": "kreuzwort.kreuzwort.view",
+        "async": true,
+        "viewPath": "kreuzwort.kreuzwort.view"
+      },
+      "routes": [
+        {
+          "name": "RouteKWR",
+          "pattern": ":?query:",
+          "target": ["TargetKWR"]
+        }
+      ],
+      "targets": {
+        "TargetKWR": {
+          "id": "KWR",
+          "name": "KWR"
+        }
+      }
+    },
+    "rootView": {
+      "viewName": "kreuzwort.kreuzwort.view.App",
+      "type": "XML",
+      "id": "App",
+      "async": true
+    }
+  }
+}

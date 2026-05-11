@@ -1,0 +1,146 @@
+/* Enter your custom styles here */
+.cellSize div div {
+  height: 50px;
+  width: 50px;
+  border: 1px solid #000;
+}
+
+.cellSize div div span {
+  height: 50px;
+  width: 50px;
+  align-content: center !important;
+  text-align: center !important;
+}
+
+.cellHighlighting div div span[data-isempty="false"][data-isletter="false"] {
+  background: rgba(0, 0, 0, 0.5);
+}
+.cellHighlighting div div span[data-isempty="false"][data-isletter="true"] {
+  background: rgba(163, 163, 163, 0.5);
+}
+
+.cellHighlighting
+  div[data-shownext="true"]
+  div
+  span[data-isempty="true"][data-nextword="next"] {
+  background: rgb(255, 185, 87);
+}
+.cellHighlighting
+  div[data-shownext="true"]
+  div
+  span[data-isempty="true"][data-nextword="reserved"] {
+  background: rgb(255, 77, 77);
+}
+.cellHighlighting
+  div
+  div
+  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="true"][data-hasvertical="true"] {
+  background: rgba(94, 255, 105, 0.5);
+}
+.cellHighlighting
+  div
+  div
+  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="false"][data-hasvertical="true"] {
+  background: rgba(252, 255, 94, 0.7);
+}
+.cellHighlighting
+  div
+  div
+  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="true"][data-hasvertical="false"] {
+  background: rgba(141, 173, 255, 0.7);
+}
+
+/* ========== Richtungspfeile ========== */
+.arrows {
+  position: relative;
+}
+
+/* Pseudoelemente:
+   - after: stellt die Pfeilspitzen dar und verschiebt diese
+   - before: stellt die Linien zu den Pfeilspitzen dar */
+.arrows::before,
+.arrows::after {
+  content: "";
+  position: absolute;
+}
+
+/* ============= PFEILSPITZEN ============= */
+/* Pfeil nach rechts */
+.arrows[data-arrowdirection="right"]::after,
+.arrows[data-arrowdirection="downright"]::after,
+.arrows[data-arrowdirection="upright"]::after {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 5px 0 5px 10px;
+  border-color: transparent transparent transparent #000;
+  left: 0%;
+  top: 50%;
+  transform: translateY(-50%);
+}
+/* Pfeil nach unten */
+.arrows[data-arrowdirection="down"]::after,
+.arrows[data-arrowdirection="rightdown"]::after,
+.arrows[data-arrowdirection="leftdown"]::after {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 10px 5px 0 5px;
+  border-color: #000 transparent transparent;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Kein Abstand wenn die Pfeilspitze direkt nach rechts/unten geht */
+.arrows[data-arrowdirection="down"]::after {
+  top: 0%;
+}
+.arrows[data-arrowdirection="right"]::after {
+  left: 0%;
+}
+
+/* Abstand vom Rand wenn zur Pfeilspitze noch eine Linie hinzukommt */
+.arrows[data-arrowdirection="downright"]::after,
+.arrows[data-arrowdirection="upright"]::after {
+  left: 5%;
+}
+
+.arrows[data-arrowdirection="rightdown"]::after,
+.arrows[data-arrowdirection="leftdown"]::after {
+  top: 5%;
+}
+
+/* ============= LINIEN ============= */
+/* Vertikale Linien */
+.arrows[data-arrowdirection="downright"]::before,
+.arrows[data-arrowdirection="upright"]::before {
+  left: 5%;
+  width: 2px;
+  height: 30px;
+  background: #000;
+  transform: translateX(-50%);
+}
+
+/* Horizontale Linien */
+.arrows[data-arrowdirection="rightdown"]::before,
+.arrows[data-arrowdirection="leftdown"]::before {
+  top: 5%;
+  width: 30px;
+  height: 2px;
+  background: #000;
+  transform: translateX(-50%);
+}
+
+.arrows[data-arrowdirection="downright"]::before {
+  top: 0;
+}
+.arrows[data-arrowdirection="upright"]::before {
+  bottom: 0;
+}
+
+.arrows[data-arrowdirection="rightdown"]::before {
+  left: 27%;
+}
+.arrows[data-arrowdirection="leftdown"]::before {
+  left: 74%;
+}
