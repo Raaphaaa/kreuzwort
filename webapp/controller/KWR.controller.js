@@ -28,6 +28,15 @@ sap.ui.define(
         this.addArrows();
       },
 
+      setGrid(grid) {
+        this.getView().setModel(new JSONModel(grid), "grid");
+      },
+
+      step() {
+        this.gridGenerator.step();
+        this.addArrows();
+      },
+
       resetArrows() {
         let oVBox = this.getView().byId("VBoxKWR");
         let rows = oVBox.getItems();
@@ -45,7 +54,9 @@ sap.ui.define(
           let oVBox = that.getView().byId("VBoxKWR");
           let row = oVBox.getItems()[arrow.y];
           let cell = row.getItems()[arrow.x];
-          cell.data("arrowdirection", arrow.direction, true);
+          if (cell.data("arrowdirection") != "") {
+            cell.data("arrowdirection", arrow.direction, true);
+          }
         });
       },
     });

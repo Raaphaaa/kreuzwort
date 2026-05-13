@@ -5,8 +5,11 @@
     <Page id="page" title="{i18n>title}">
         <VBox>
             <Button
-            text="Reset"
-            press=".reset"/>
+                text="Reset"
+                press=".reset"/>
+            <Button
+                text="Step"
+                press=".step"/>
         </VBox>
         <HBox>
             <VBox

@@ -1,6 +1,11 @@
 sap.ui.define([], function () {
   "use strict";
 
+  /** Dummy-Klasse
+   * Jedes Dummy Objekt repräsentiert ein Feld, auf dem zukünftig der Hinweis für
+   * ein Wort steht. Wenn der Dummy über shape() ausgeprägt wird, werden Richtung
+   * und Länge des zugehörigen Wortes festgelegt.
+   */
   return class Dummy {
     constructor(x, y, caller) {
       this.x = x;
@@ -15,11 +20,15 @@ sap.ui.define([], function () {
       this.horizontal = null;
       this.length = null;
 
+      // Mögliche Platzierungen für das spätere Wort; enthält Objekte, welche Richtung
+      // und Länge der möglichen Platzierung angeben
       this.possibilities = [];
-      this.invalidate();
+      this.triedPossibilities = [];
+      this._refreshPossibilities();
     }
 
     invalidate() {
+      this.generator.removeDummyFromGrid(this);
       this.shaped = false;
       this.startX = null;
       this.startY = null;
@@ -31,17 +40,25 @@ sap.ui.define([], function () {
 
     shape() {
       // Takes the best possibility and sets length/direction accordingly
-      this.shaped = true;
+      // TODO triedPossibilities nicht berücksichtigen
       let temp =
         this.possibilities[
           this.generator.getRandomInt(0, this.possibilities.length - 1)
         ];
+
+      if (!temp) {
+        console.log("No possibilities for: " + this);
+        return;
+      }
+
+      this.triedPossibilities.push(temp);
+      this.shaped = true;
       this.startX = this._getStartX(temp.direction);
       this.startY = this._getStartY(temp.direction);
       this.horizontal = this._getHorizontal(temp.direction);
       this.direction = temp.direction;
       this.length = temp.length;
-      this.generator.refreshGrid();
+      this.generator.addDummyToGrid(this);
     }
 
     _refreshPossibilities() {
@@ -74,23 +91,23 @@ sap.ui.define([], function () {
 
     _getDirections() {
       let directions = [];
-      const gridData = this.generator.getGrid().getData();
+      const grid = this.generator.getGrid();
       let x = this.x;
       let y = this.y;
       if (
         x > 0 &&
-        gridData[y][x - 1] &&
-        !gridData[y][x - 1].reserved &&
-        (gridData[y][x - 1].isEmpty || gridData[y][x - 1].isLetter)
+        grid[y][x - 1] &&
+        !grid[y][x - 1].reserved &&
+        (grid[y][x - 1].isEmpty || grid[y][x - 1].isLetter)
       ) {
         // field to the left
         directions.push("leftdown");
       }
       if (
         x < 11 &&
-        gridData[y][x + 1] &&
-        !gridData[y][x + 1].reserved &&
-        (gridData[y][x + 1].isEmpty || gridData[y][x + 1].isLetter)
+        grid[y][x + 1] &&
+        !grid[y][x + 1].reserved &&
+        (grid[y][x + 1].isEmpty || grid[y][x + 1].isLetter)
       ) {
         // field to the right
         directions.push("right");
@@ -98,18 +115,18 @@ sap.ui.define([], function () {
       }
       if (
         y > 0 &&
-        gridData[y - 1][x] &&
-        !gridData[y - 1][x].reserved &&
-        (gridData[y - 1][x].isEmpty || gridData[y - 1][x].isLetter)
+        grid[y - 1][x] &&
+        !grid[y - 1][x].reserved &&
+        (grid[y - 1][x].isEmpty || grid[y - 1][x].isLetter)
       ) {
         // field above
         directions.push("upright");
       }
       if (
         y < 11 &&
-        gridData[y + 1][x] &&
-        !gridData[y + 1][x].reserved &&
-        (gridData[y + 1][x].isEmpty || gridData[y + 1][x].isLetter)
+        grid[y + 1][x] &&
+        !grid[y + 1][x].reserved &&
+        (grid[y + 1][x].isEmpty || grid[y + 1][x].isLetter)
       ) {
         // field below
         directions.push("down");
@@ -119,7 +136,7 @@ sap.ui.define([], function () {
     }
 
     _validateDirection(direction) {
-      const gridData = this.generator.getGrid().getData();
+      const grid = this.generator.getGrid();
 
       let x = this._getStartX(direction);
       let y = this._getStartY(direction);
@@ -132,10 +149,10 @@ sap.ui.define([], function () {
       let previousX = x - moveX;
       let previousY = y - moveY;
       if (
-        gridData[previousY] &&
-        gridData[previousY][previousX] &&
-        !gridData[previousY][previousX].isEmpty &&
-        gridData[previousY][previousX].isLetter
+        grid[previousY] &&
+        grid[previousY][previousX] &&
+        !grid[previousY][previousX].isEmpty &&
+        grid[previousY][previousX].isLetter
       ) {
         return false;
       }
@@ -148,8 +165,8 @@ sap.ui.define([], function () {
 
       // check for an existing word in the same direction
       if (
-        (horizontal && gridData[y][x].dummyHorizontal != null) ||
-        (!horizontal && gridData[y][x].dummyVertical != null)
+        (horizontal && grid[y][x].dummyHorizontal != null) ||
+        (!horizontal && grid[y][x].dummyVertical != null)
       ) {
         return false;
       }
@@ -158,8 +175,10 @@ sap.ui.define([], function () {
     }
 
     _getValidLengths(direction) {
-      const gridData = this.generator.getGrid().getData();
+      const grid = this.generator.getGrid();
       let that = this;
+      let width = this.generator.width;
+      let height = this.generator.height;
 
       let validLengths = [];
       let length = 2;
@@ -171,18 +190,18 @@ sap.ui.define([], function () {
         x += moveX;
         y += moveY;
         // exceeding the gird or the field is reserved for a new clue
-        if (x >= this.width || y >= this.height || gridData[y][x].reserved) {
+        if (x >= width || y >= height || grid[y][x].reserved) {
           break;
         }
 
-        let currentField = gridData[y][x];
+        let currentField = grid[y][x];
 
         // continue when the current field is empty or a letter
         if (currentField.isEmpty || currentField.isLetter) {
           // check, if the next field would be within the grid. IF so, that
           // field has to be checked as well
-          if (x + moveX < this.width && y + moveY < this.height) {
-            let nextField = gridData[y + moveY][x + moveX];
+          if (x + moveX < width && y + moveY < height) {
+            let nextField = grid[y + moveY][x + moveX];
             // only if the next field is empty or a clue, a word can be placed up to the
             // current field without issues. If it would be a letter(x), the word ending right
             // in front of it would be invalid:

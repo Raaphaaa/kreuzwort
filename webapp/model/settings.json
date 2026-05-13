@@ -2,8 +2,8 @@
   "width": 12,
   "height": 12,
   "maxLength": 7,
-  "firstWordX": 3,
-  "firstWordY": 3,
+  "firstWordX": 0,
+  "firstWordY": 0,
   "showPattern": true,
   "showLocations": true,
   "getOptionalLocations": true
