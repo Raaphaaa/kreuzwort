@@ -23,47 +23,61 @@ sap.ui.define([], function () {
       // Mögliche Platzierungen für das spätere Wort; enthält Objekte, welche Richtung
       // und Länge der möglichen Platzierung angeben
       this.possibilities = [];
-      this.triedPossibilities = [];
-      this._refreshPossibilities();
+      this.triedPossibilities = new Set();
+
+      console.log("Created ", this);
     }
 
-    invalidate() {
+    // invalidate() {
+    //   this.generator.removeDummyFromGrid(this);
+    //   this.shaped = false;
+    //   this.startX = null;
+    //   this.startY = null;
+    //   this.direction = null;
+    //   this.horizontal = null;
+    //   this.length = null;
+    //   this._refreshPossibilities();
+    // }
+
+    remove() {
+      let field = this.generator.getField(this.x, this.y);
       this.generator.removeDummyFromGrid(this);
-      this.shaped = false;
-      this.startX = null;
-      this.startY = null;
-      this.direction = null;
-      this.horizontal = null;
-      this.length = null;
-      this._refreshPossibilities();
+      field.forcedBy.forEach(function (dummy) {
+        dummy.shape();
+      });
     }
 
     shape() {
-      // Takes the best possibility and sets length/direction accordingly
-      // TODO triedPossibilities nicht berücksichtigen
-      let temp =
-        this.possibilities[
-          this.generator.getRandomInt(0, this.possibilities.length - 1)
-        ];
+      // Dummy entfernen, damit die eigenen Buchstaben und dadurch gesetzten Hinweisfelder
+      // nicht die Berechnung der möglichen Wortlängen/Richtungen beeinflussen
+      if (this.shaped) {
+        this.generator.removeDummyFromGrid(this);
+        console.log("Reshaped ", this);
+      }
 
-      if (!temp) {
-        console.log("No possibilities for: " + this);
+      this._refreshPossibilities();
+      // Takes the best possibility and sets length/direction accordingly
+      if (this.possibilities.length == 0) {
+        this.remove();
         return;
       }
 
-      this.triedPossibilities.push(temp);
+      let temp = this.possibilities[0];
+      this.triedPossibilities.add(this._getPossibilityKey(temp));
       this.shaped = true;
       this.startX = this._getStartX(temp.direction);
       this.startY = this._getStartY(temp.direction);
       this.horizontal = this._getHorizontal(temp.direction);
       this.direction = temp.direction;
       this.length = temp.length;
+
       this.generator.addDummyToGrid(this);
     }
 
     _refreshPossibilities() {
       let directions = this._getValidDirections();
       let that = this;
+      this.possibilities = [];
 
       directions.forEach(function (direction) {
         let lengths = that._getValidLengths(direction);
@@ -71,26 +85,76 @@ sap.ui.define([], function () {
           that.possibilities.push({
             direction: direction,
             length: length,
+            score: 0,
           });
         });
       });
+
+      this.possibilities = this.possibilities.filter(function (possibility) {
+        return !that.triedPossibilities.has(
+          that._getPossibilityKey(possibility),
+        );
+      });
+
+      if (this.possibilities.length == 0) {
+        console.log("No possibilities for ", this);
+        return;
+      }
+
+      this._evaluatePossibilities();
+      this.possibilities.sort(function (a, b) {
+        return b.score - a.score;
+      });
+    }
+
+    _evaluatePossibilities() {
+      //TODO in refreshPossibilities verschieben und direkt da machen;
+      // + zusätzlich extra Bewertung für die gesamte Richtung, bei der
+      // alle Längen zusammengerechnet werden, siehe kwr2/Generator/checkDirections
+      let that = this;
+      for (let i = 0; i < that.possibilities.length; i++) {
+        let possibility = that.possibilities[i];
+        let x = that._getStartX(possibility.direction);
+        let y = that._getStartY(possibility.direction);
+        let moveX = that._getMoveX(possibility.direction);
+        let moveY = that._getMoveY(possibility.direction);
+
+        let score = 0;
+        // Feldbewertungen
+        for (let j = 0; j < possibility.length; j++) {
+          score += that.generator.getEvaluation(x, y) / possibility.length;
+          x += moveX;
+          y += moveY;
+        }
+        // Richtungsbewertung für standardmäßig horizontale und vertikale Wörter
+        score *= that.generator.getDirectionEvaluation(possibility.direction);
+
+        // Längenbonus zur Vermeidung übermäßig vieler kurzer/langer Wörter
+        score += that.generator.getLengthBonus(possibility.length);
+
+        that.possibilities[i].score = parseFloat(score.toFixed(2));
+      }
+    }
+
+    _getPossibilityKey(possibility) {
+      return possibility.direction + ":" + possibility.length;
     }
 
     _getValidDirections() {
       let directions = this._getDirections();
-      let validDirections = [];
+      let validDirections = new Set();
       let that = this;
 
       directions.forEach(function (direction) {
         if (that._validateDirection(direction)) {
-          validDirections.push(direction);
+          validDirections.add(direction);
         }
       });
       return validDirections;
     }
 
     _getDirections() {
-      let directions = [];
+      let directions = new Set();
       const grid = this.generator.getGrid();
       let x = this.x;
       let y = this.y;
@@ -101,7 +165,7 @@ sap.ui.define([], function () {
         (grid[y][x - 1].isEmpty || grid[y][x - 1].isLetter)
       ) {
         // field to the left
-        directions.push("leftdown");
+        directions.add("leftdown");
       }
       if (
         x < 11 &&
@@ -110,8 +174,10 @@ sap.ui.define([], function () {
         (grid[y][x + 1].isEmpty || grid[y][x + 1].isLetter)
       ) {
         // field to the right
-        directions.push("right");
-        directions.push("rightdown");
+        directions.add("right");
+        if (y != 1) {
+          directions.add("rightdown");
+        }
       }
       if (
         y > 0 &&
@@ -120,7 +186,8 @@ sap.ui.define([], function () {
         (grid[y - 1][x].isEmpty || grid[y - 1][x].isLetter)
       ) {
         // field above
-        directions.push("upright");
+
+        directions.add("upright");
       }
       if (
         y < 11 &&
@@ -129,8 +196,11 @@ sap.ui.define([], function () {
         (grid[y + 1][x].isEmpty || grid[y + 1][x].isLetter)
       ) {
         // field below
-        directions.push("down");
-        directions.push("downright");
+        directions.add("down");
+
+        if (x != 1) {
+          directions.add("downright");
+        }
       }
       return directions;
     }

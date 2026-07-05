@@ -55,6 +55,10 @@
       "settings": {
         "type": "sap.ui.model.json.JSONModel",
         "uri": "./model/settings.json"
+      },
+      "weights": {
+        "type": "sap.ui.model.json.JSONModel",
+        "uri": "./model/weights.json"
       }
     },
     "resources": {

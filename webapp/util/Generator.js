@@ -7,6 +7,7 @@ sap.ui.define(
       constructor(controllerRef) {
         this.controller = controllerRef;
         this.grid = [];
+        this.gridEvaluation = [];
         this.dummys = [];
       }
 
@@ -16,58 +17,266 @@ sap.ui.define(
         this.width = settings.getProperty("/width");
         this.maxLength = settings.getProperty("/maxLength");
 
+        this.eval = {
+          finished: 0,
+          partial: 0,
+          empty: this.height * this.width,
+        };
         this.reset();
       }
 
       reset() {
         this.dummys = [];
         this.resetGrid();
-        this._placeFirstDummy();
+        this._shapeFirstDummy();
         this.controller.setGrid(this.getGrid());
       }
 
-      step() {
-        let that = this;
-        let newLocations = this._getNextDummyLocations();
-
-        let dummy = new Dummy(newLocations[0].x, newLocations[0].y, this);
-        this.dummys.push(dummy);
-        dummy.shape();
-        // Sortierung aller markierten Spots. Dabei wird die Entfernung
-        // zur linken oberen Ecke berücksichtigt, um das Rätsel von dort
-        // aus aufzubauen
-
-        console.log(newLocations);
+      getField(x, y) {
+        return this.grid[y][x];
       }
 
-      _getNextDummyLocations() {
+      step() {
+        let that = this,
+          location,
+          dummy,
+          forcedLocations = this._getForcedDummyLocations(),
+          optionalLocations = this._getOptionalDummyLocations();
+
+        if (forcedLocations.length > 0) {
+          location = forcedLocations[0];
+        } else if (optionalLocations.length > 0) {
+          location = optionalLocations[0];
+        } else {
+          console.log("NO MARKED LOCATIONS LEFT");
+          return;
+        }
+        dummy = new Dummy(location.x, location.y, that);
+        dummy.shape();
+
+        console.log(this.getScore());
+      }
+
+      getScore() {
+        return this._calculateScore();
+      }
+
+      _calculateScore() {
+        this._countFields();
+        let score = 0;
+        let totalFields = this.height * this.width;
+        score += this.eval.finished * 3;
+        score -= this.eval.partial;
+        score *= this.eval.empty / totalFields;
+        return parseFloat(score.toFixed(2));
+      }
+
+      _countFields() {
+        let that = this;
+        let empty = 0;
+        let finished = 0;
+        let partial = 0;
+        for (let y = 0; y < that.height; y++) {
+          for (let x = 0; x < that.width; x++) {
+            let field = that.grid[y][x];
+            if (field.isEmpty) {
+              empty += 1;
+              continue;
+            }
+
+            if (
+              (field.hasHorizontalWord && field.hasVerticalWord) ||
+              field.isClue
+            ) {
+              finished += 1;
+              continue;
+            }
+
+            if (field.hasHorizontalWord || field.hasVerticalWord) {
+              partial += 1;
+            }
+          }
+        }
+        this.eval.finished = finished;
+        this.eval.partial = partial;
+        this.eval.empty = empty;
+      }
+
+      getEvaluation(x, y) {
+        return this.gridEvaluation[y][x].score;
+      }
+
+      getDirectionEvaluation(direction) {
+        return this.controller
+          .getView()
+          .getModel("weights")
+          .getProperty("/directions/" + direction);
+      }
+
+      getLengthBonus(length) {
+        return this.controller
+          .getView()
+          .getModel("weights")
+          .getProperty(`/lengthBonus/${length}`);
+      }
+
+      _evaluateGrid() {
+        let that = this;
+        this.grid.forEach(function (row) {
+          row.forEach(function (field) {
+            let edges = that._getAdjEdges(field);
+            let clues = that._getAdjClues(field);
+            let letters = that._getAdjLetters(field);
+            let score = 0;
+
+            score += letters * 0.2;
+            score += clues * 0.5;
+            score += edges * 0.3;
+            score += (that.width - field.x) * 0.1;
+            score += (that.height - field.y) * 0.1;
+            score = parseFloat(score.toFixed(2));
+
+            if (!that.gridEvaluation[field.y]) {
+              that.gridEvaluation[field.y] = [];
+            }
+            that.gridEvaluation[field.y][field.x] = {
+              edges: edges,
+              clues: clues,
+              letters: letters,
+              score: score,
+            };
+
+            that.grid[field.y][field.x].score = score;
+          });
+        });
+      }
+
+      _getAdjEdges(field) {
+        let edges = 0;
+        if (field.x == 0 || field.x == this.width - 1) {
+          edges += 1;
+        }
+        if (field.y == 0 || field.y == this.height - 1) {
+          edges += 1;
+        }
+        return edges;
+      }
+
+      _getAdjClues(field) {
+        let clues = 0;
+        let x = field.x;
+        let y = field.y;
+        // Prüfen, ob links/recht/oberhalb/unterhalb des
+        // aktuellen Feldes ein angrenzendes Hinweisfeld von
+        // bestehenden Wörtern liegt.
+        if (x > 0) {
+          let left = this.grid[y][x - 1];
+          if (left && !left.isEmpty && left.isClue) {
+            clues += 1;
+          }
+        }
+
+        if (x < this.width - 1) {
+          let right = this.grid[y][x + 1];
+          if (right && !right.isEmpty && right.isClue) {
+            clues += 1;
+          }
+        }
+
+        if (y > 0) {
+          let above = this.grid[y - 1][x];
+          if (above && !above.isEmpty && above.isClue) {
+            clues += 1;
+          }
+        }
+
+        if (y < this.height - 1) {
+          let below = this.grid[y + 1][x];
+          if (below && !below.isEmpty && below.isClue) {
+            clues += 1;
+          }
+        }
+
+        return clues;
+      }
+
+      _getAdjLetters(field) {
+        let letters = 0;
+        let x = field.x;
+        let y = field.y;
+        // Prüfen, ob links/recht/oberhalb/unterhalb des
+        // aktuellen Feldes ein angrenzender Buchstabe von
+        // bestehenden Wörtern liegt.
+        if (x > 0) {
+          let left = this.grid[y][x - 1];
+          if (left && !left.isEmpty && left.isLetter) {
+            letters += 1;
+          }
+        }
+
+        if (x < this.width - 1) {
+          let right = this.grid[y][x + 1];
+          if (right && !right.isEmpty && right.isLetter) {
+            letters += 1;
+          }
+        }
+
+        if (y > 0) {
+          let above = this.grid[y - 1][x];
+          if (above && !above.isEmpty && above.isLetter) {
+            letters += 1;
+          }
+        }
+
+        if (y < this.height - 1) {
+          let below = this.grid[y + 1][x];
+          if (below && !below.isEmpty && below.isLetter) {
+            letters += 1;
+          }
+        }
+
+        return letters;
+      }
+
+      _getForcedDummyLocations() {
         let that = this;
         let locations = [];
         this.grid.forEach(function (row) {
           row.forEach(function (field) {
-            if (field.nextWordLocation && field.isEmpty) {
+            if (field.nextWordLocation && field.isEmpty && field.reserved) {
               locations.push({
-                x: field.x,
-                y: field.y,
-                forced: field.reserved,
+                field: field,
+                score: that.getEvaluation(field.x, field.y),
               });
             }
           });
         });
+        locations.sort(function (a, b) {
+          return b.score - a.score;
+        });
+        return locations.map(function (location) {
+          return location.field;
+        });
+      }
 
-        return locations.sort((a, b) => {
-          let scoreA = a.x + a.y - (a.forced ? 2 : 0);
-          let scoreB = b.x + b.y - (b.forced ? 2 : 0);
-          if (scoreA !== scoreB) {
-            return scoreA - scoreB;
-          }
-          // Gleicher Score --> Den Spot wählen, der diagonal näher an der
-          // linken oberen Ecke liegt
-          return (
-            Math.abs(a.x - a.y) +
-            (a.forced ? 2 : 0) -
-            (Math.abs(b.x - b.y) + (b.forced ? 2 : 0))
-          );
+      _getOptionalDummyLocations() {
+        let that = this;
+        let locations = [];
+        this.grid.forEach(function (row) {
+          row.forEach(function (field) {
+            if (field.nextWordLocation && field.isEmpty && !field.reserved) {
+              locations.push({
+                field: field,
+                score: that.getEvaluation(field.x, field.y),
+              });
+            }
+          });
+        });
+        locations.sort(function (a, b) {
+          return b.score - a.score;
+        });
+        return locations.map(function (location) {
+          return location.field;
         });
       }
 
@@ -83,6 +292,7 @@ sap.ui.define(
               isEmpty: true,
               isLetter: false,
               isClue: false,
+              score: 0,
               dummyHorizontal: null,
               dummyVertical: null,
               forcedBy: new Set(),
@@ -94,6 +304,7 @@ sap.ui.define(
             };
           }
         }
+        this._evaluateGrid();
       }
 
       getGrid() {
@@ -121,7 +332,7 @@ sap.ui.define(
         return arrows;
       }
 
-      _placeFirstDummy() {
+      _shapeFirstDummy() {
         let x = this.controller
           .getView()
           .getModel("settings")
@@ -135,9 +346,7 @@ sap.ui.define(
         y = y > 5 ? 5 : y;
 
         let dummy = new Dummy(x, y, this);
-        this.dummys.push(dummy);
         dummy.shape();
-        // dummy.invalidate();
       }
 
       getRandomInt(min, max) {
@@ -146,11 +355,18 @@ sap.ui.define(
         return Math.floor(Math.random() * (max - min + 1)) + min;
       }
 
+      removeLastWord() {
+        this.removeDummyFromGrid(this.dummys[this.dummys.length - 1]);
+      }
+
       addDummyToGrid(dummy) {
+        this.dummys.push(dummy);
         this._addDummyLetters(dummy);
         this._markForcedWordLocations(dummy);
         this._markOptionalWordLocations(dummy);
+        this._evaluateGrid();
         this.controller.setGrid(this.getGrid());
+        console.log("Added ", dummy);
       }
 
       _addDummyLetters(dummy) {
@@ -171,6 +387,7 @@ sap.ui.define(
           } else {
             field.dummyVertical = dummy;
           }
+          // TODO Oberserver Pattern für invalidate später
 
           if (dummy.horizontal) {
             field.hasHorizontalWord = true;
@@ -398,6 +615,10 @@ sap.ui.define(
               that.grid[minY][x].nextWordLocation = true;
               that.grid[minY][x].reserved = false;
               that.grid[minY][x].markedBy.add(dummy);
+              if (x == 1 && that.grid[minY][0].isEmpty) {
+                that.grid[minY][0].nextWordLocation = true;
+                that.grid[minY][0].reserved = true;
+              }
             }
           }
           // if the word is vertical, mark the fartest field to the left of
@@ -419,6 +640,10 @@ sap.ui.define(
               that.grid[y][minX].nextWordLocation = true;
               that.grid[y][minX].reserved = false;
               that.grid[y][minX].markedBy.add(dummy);
+              if (y == 1 && that.grid[0][minX].isEmpty) {
+                that.grid[0][minX].nextWordLocation = true;
+                that.grid[0][minX].reserved = true;
+              }
             }
           }
         }
@@ -427,10 +652,16 @@ sap.ui.define(
       removeDummyFromGrid(dummy) {
         this._removeDummyLetters(dummy);
         this._unmarkNextWordLocations(dummy);
+        if (this.dummys.indexOf(dummy) != -1) {
+          this.dummys.splice(this.dummys.indexOf(dummy), 1);
+        }
+        this._evaluateGrid();
         this.controller.setGrid(this.getGrid());
+        console.log("Removed ", dummy);
       }
 
       _removeDummyLetters(dummy) {
+        // clue field
         this.grid[dummy.y][dummy.x].isEmpty = true;
         this.grid[dummy.y][dummy.x].isLetter = false;
         this.grid[dummy.y][dummy.x].isClue = false;
@@ -440,8 +671,14 @@ sap.ui.define(
           let x = dummy.startX + (dummy.horizontal ? j : 0);
           let y = dummy.startY + (dummy.horizontal ? 0 : j);
           let field = this.grid[y][x];
-          field.isEmpty = true;
-          field.isLetter = false;
+
+          if (
+            (dummy.horizontal && !field.hasVerticalWord) ||
+            (!dummy.horizontal && !field.hasHorizontalWord)
+          ) {
+            field.isEmpty = true;
+            field.isLetter = false;
+          }
 
           if (dummy.horizontal) {
             field.dummyHorizontal = null;
@@ -479,15 +716,15 @@ sap.ui.define(
         this.grid.forEach(function (row) {
           row.forEach(function (field) {
             // Entfernen aller forcierten Marker
-            field.forcedBy.delete(dummy);
-            if (field.forcedBy.size == 0) {
-              field.nextWordLocation = false;
+            if (field.forcedBy.delete(dummy) && field.forcedBy.size == 0) {
+              if (field.markedBy.size == 0) {
+                field.nextWordLocation = false;
+              }
               field.reserved = false;
             }
 
             // Entfernen aller optionalen Marker
-            field.markedBy.delete(dummy);
-            if (field.markedBy.size == 0) {
+            if (field.markedBy.delete(dummy) && field.markedBy.size == 0) {
               field.nextWordLocation = false;
             }
 

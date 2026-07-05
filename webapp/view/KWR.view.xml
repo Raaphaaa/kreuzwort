@@ -10,6 +10,9 @@
             <Button
                 text="Step"
                 press=".step"/>
+            <Button
+                text="Remove"
+                press=".removeLastWord"/>
         </VBox>
         <HBox>
             <VBox
@@ -30,7 +33,7 @@
                         <items>
                             <Text
                                 class="arrows"
-                                text="">
+                                text="{grid>score}">
                                 <customData>
                                     <core:CustomData
                                         key="isempty"

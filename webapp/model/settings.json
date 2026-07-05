@@ -1,6 +1,7 @@
 {
   "width": 12,
   "height": 12,
+  "animationDelay": 200,
   "maxLength": 7,
   "firstWordX": 0,
   "firstWordY": 0,
