@@ -47,7 +47,7 @@ sap.ui.define([], function () {
       });
     }
 
-    shape() {
+    shape(random = false) {
       // Dummy entfernen, damit die eigenen Buchstaben und dadurch gesetzten Hinweisfelder
       // nicht die Berechnung der möglichen Wortlängen/Richtungen beeinflussen
       if (this.shaped) {
@@ -62,7 +62,13 @@ sap.ui.define([], function () {
         return;
       }
 
-      let temp = this.possibilities[0];
+      let temp, i;
+      if (random) {
+        i = this.generator.getRandomInt(0, this.possibilities.length - 1);
+        temp = this.possibilities[i];
+      } else {
+        temp = this.possibilities[0];
+      }
       this.triedPossibilities.add(this._getPossibilityKey(temp));
       this.shaped = true;
       this.startX = this._getStartX(temp.direction);
@@ -118,21 +124,85 @@ sap.ui.define([], function () {
         let y = that._getStartY(possibility.direction);
         let moveX = that._getMoveX(possibility.direction);
         let moveY = that._getMoveY(possibility.direction);
-
+        let diagonalClueBonus = 0;
+        let reservedBonus = 0;
         let score = 0;
+
         // Feldbewertungen
         for (let j = 0; j < possibility.length; j++) {
           score += that.generator.getEvaluation(x, y) / possibility.length;
+
+          // Beim letzten Feld nach angrenzenden Hinweisfeldern suchen. Hinweisfelder
+          // sollten möglichst isoliert liegen und nicht nebeneinander. Daher ist es schlecht wenn das
+          // Wort neben einem exitierenden Hinweisfeld endet.
+          if (j === possibility.length - 1) {
+            diagonalClueBonus = that.generator.getDiagonalClues({
+              x: x,
+              y: y,
+              horizontal: moveX > 0,
+              startX: that._getStartX(possibility.direction),
+              startY: that._getStartY(possibility.direction),
+            });
+
+            if (
+              that.possibilities[i + 1] &&
+              that.possibilities[i + 1].direction === possibility.direction &&
+              that.possibilities[i + 1].length - 1 != possibility.length
+            ) {
+              reservedBonus = 0.5;
+            }
+            // Bonus, falls das nächste Feld bereits ein Hinweisfeld ist.
+            reservedBonus += that.generator.checkFieldReserved(
+              x + moveX,
+              y + moveY,
+            )
+              ? 1
+              : 0;
+          }
           x += moveX;
           y += moveY;
         }
+
+        score += reservedBonus;
+
+        // Je weniger Hinweisfelder diagonal vom letzten Wortfeld liegen, desto
+        // besser & weniger Möglichkeiten, dass Hinweisfelder direkt nebeneinander liegen.
+        score += diagonalClueBonus;
+
         // Richtungsbewertung für standardmäßig horizontale und vertikale Wörter
         score *= that.generator.getDirectionEvaluation(possibility.direction);
 
-        // Längenbonus zur Vermeidung übermäßig vieler kurzer/langer Wörter
+        // Längenbonus zur Vermeidung zu vieler kurzer/langer Wörter
         score += that.generator.getLengthBonus(possibility.length);
 
+        // Check, ob parallel ein Wort verläuft, welches die gleiche Länge und Orientierung hat. Wäre
+        // schlecht für das Rätsel
+        if (
+          that.generator.checkParallelWord(
+            that.x,
+            that.y,
+            possibility.direction,
+            possibility.length,
+          )
+        ) {
+          score /= 2;
+        }
         that.possibilities[i].score = parseFloat(score.toFixed(2));
+
+        console.log(
+          "direction ",
+          possibility.direction,
+          " length ",
+          possibility.length,
+          " has score ",
+          that.possibilities[i].score,
+          " diagonalClueScore ",
+          diagonalClueBonus,
+          " reservedBonus ",
+          reservedBonus,
+          " lengthBonus ",
+          that.generator.getLengthBonus(possibility.length),
+        );
       }
     }
 

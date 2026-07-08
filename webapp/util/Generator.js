@@ -33,7 +33,9 @@ sap.ui.define(
       }
 
       getField(x, y) {
-        return this.grid[y][x];
+        if (x < this.width && y < this.height) {
+          return this.grid[y][x];
+        }
       }
 
       step() {
@@ -46,6 +48,17 @@ sap.ui.define(
         if (forcedLocations.length > 0) {
           location = forcedLocations[0];
         } else if (optionalLocations.length > 0) {
+          // Sortieren nach Anzahl angrenzender Hinweisfelder
+          optionalLocations.sort(function (a, b) {
+            let objA = { x: a.x, y: a.y };
+            let objB = { x: b.x, y: b.y };
+            let adjClueDiff = that._getAdjClues(objA) - that._getAdjClues(objB);
+            if (adjClueDiff !== 0) {
+              return adjClueDiff;
+            }
+
+            return that.getEvaluation(b.x, b.y) - that.getEvaluation(a.x, a.y);
+          });
           location = optionalLocations[0];
         } else {
           console.log("NO MARKED LOCATIONS LEFT");
@@ -54,7 +67,14 @@ sap.ui.define(
         dummy = new Dummy(location.x, location.y, that);
         dummy.shape();
 
-        console.log(this.getScore());
+        //TODO: Check, ob aktuelles Grid valide ist. d.h. nach Konstellationen suchen, wo
+        // 2 oder mehr nebeneinanderliegende Felder bereits in eine Richtung gefüllt sind, aber es
+        // keine Möglichkeit gibt, dort ein Wort in die andere Richtung zu platzieren oder einen
+        // Hinweis so, dass diese Richtung entfällt
+
+        // TODO: Validierung, dass alle Felder noch befüllt werden können und keine leeren Felder
+        // übrig bleiben
+        // console.log(this.getScore());
       }
 
       getScore() {
@@ -113,11 +133,73 @@ sap.ui.define(
           .getProperty("/directions/" + direction);
       }
 
+      checkFieldReserved(x, y) {
+        if (x < this.width && y < this.height) {
+          return this.grid[y][x].reserved;
+        }
+        return true;
+      }
+
+      checkParallelWord(x, y, direction, length) {
+        if (
+          direction === "rightdown" ||
+          direction === "leftdown" ||
+          direction === "upright" ||
+          direction === "downright"
+        ) {
+          return false;
+        }
+
+        this.dummys.forEach(function (dummy) {
+          if (
+            dummy.x == x &&
+            dummy.y == y &&
+            dummy.direction == direction &&
+            dummy.length - 1 <= length <= dummy.length + 1
+          ) {
+            return true;
+          }
+        });
+        return false;
+      }
+
       getLengthBonus(length) {
-        return this.controller
+        let bonus = this.controller
           .getView()
           .getModel("weights")
           .getProperty(`/lengthBonus/${length}`);
+
+        let averageWordLength = this.controller
+          .getView()
+          .getModel("settings")
+          .getProperty("/averageWordLength");
+
+        let currentAverage = this._getCurrentAverageWordLength();
+
+        let bonusLong, bonusShort;
+        let diff = averageWordLength - currentAverage;
+        // Vorgegebene Durchschnittslänge größer als aktuelle Durchschnittlänge
+        if (diff >= 0) {
+          bonusLong = diff / averageWordLength + 1;
+          bonusShort = 1 - diff / averageWordLength;
+        } else {
+          bonusLong = 1 - diff / averageWordLength;
+          bonusShort = diff / averageWordLength + 1;
+        }
+
+        if (length < averageWordLength) {
+          return bonus * bonusShort;
+        } else {
+          return bonus * bonusLong;
+        }
+      }
+
+      _getCurrentAverageWordLength() {
+        let totalLength = 0;
+        for (let i = 0; i < this.dummys.length; i++) {
+          totalLength += this.dummys[i].length;
+        }
+        return totalLength / this.dummys.length;
       }
 
       _evaluateGrid() {
@@ -130,8 +212,13 @@ sap.ui.define(
             let score = 0;
 
             score += letters * 0.2;
-            score += clues * 0.5;
-            score += edges * 0.3;
+            if (!field.isClue) {
+              score += clues * 0.5;
+            }
+            if (field.nextWordLocation) {
+              score += 1;
+            }
+            score += edges * 0.6;
             score += (that.width - field.x) * 0.1;
             score += (that.height - field.y) * 0.1;
             score = parseFloat(score.toFixed(2));
@@ -149,6 +236,68 @@ sap.ui.define(
             that.grid[field.y][field.x].score = score;
           });
         });
+      }
+
+      getDiagonalClues(field) {
+        // WEnn diagonal hinter dem Feld Hinweisfelder liegen, entstehen
+        // gute Lücken für Kreuzungen
+        let clues = 0;
+        let x = field.x;
+        let y = field.y;
+
+        if (field.horizontal) {
+          // Topleft
+          if (x > 0 && y > 0) {
+            let topleft = this.grid[y - 1][x - 1];
+            if (topleft.x != field.startX && topleft.y != field.startY) {
+              if (topleft.reserved) {
+                clues += 1;
+              } else if (topleft.nextWordLocation) {
+                clues += 0.5;
+              }
+            }
+          }
+          // Bottomleft
+          if (y < this.height - 1 && x > 0) {
+            let bottomleft = this.grid[y + 1][x - 1];
+            if (bottomleft.x != field.startX && bottomleft.y != field.startY) {
+              if (bottomleft.reserved) {
+                clues += 1;
+              } else if (bottomleft.nextWordLocation) {
+                clues += 0.5;
+              }
+            }
+          }
+        } else {
+          // Topright
+          if (x < this.width - 1 && y > 0) {
+            let topright = this.grid[y - 1][x + 1];
+            if (topright.x != field.startX && topright.y != field.startY) {
+              if (topright.reserved) {
+                clues += 1;
+              } else if (topright.nextWordLocation) {
+                clues += 0.5;
+              }
+            }
+          }
+
+          // Bottomright
+          if (y < this.height - 1 && x < this.width - 1) {
+            let bottomright = this.grid[y + 1][x + 1];
+            if (
+              bottomright.x != field.startX &&
+              bottomright.y != field.startY
+            ) {
+              if (bottomright.reserved) {
+                clues += 1;
+              } else if (bottomright.nextWordLocation) {
+                clues += 0.5;
+              }
+            }
+          }
+        }
+
+        return clues;
       }
 
       _getAdjEdges(field) {
@@ -346,7 +495,7 @@ sap.ui.define(
         y = y > 5 ? 5 : y;
 
         let dummy = new Dummy(x, y, this);
-        dummy.shape();
+        dummy.shape(true);
       }
 
       getRandomInt(min, max) {
@@ -577,7 +726,7 @@ sap.ui.define(
             that.grid[dummy.y][dummy.x + 2].isEmpty
           ) {
             that.grid[dummy.y][dummy.x + 2].nextWordLocation = true;
-            that.grid[dummy.y][dummy.x + 2].reserved = false;
+            // that.grid[dummy.y][dummy.x + 2].reserved = false;
             that.grid[dummy.y][dummy.x + 2].markedBy.add(dummy);
           }
         } else {
@@ -587,7 +736,7 @@ sap.ui.define(
             that.grid[dummy.y + 2][dummy.x].isEmpty
           ) {
             that.grid[dummy.y + 2][dummy.x].nextWordLocation = true;
-            that.grid[dummy.y + 2][dummy.x].reserved = false;
+            // that.grid[dummy.y + 2][dummy.x].reserved = false;
             that.grid[dummy.y + 2][dummy.x].markedBy.add(dummy);
           }
         }
