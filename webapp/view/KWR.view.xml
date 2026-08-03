@@ -33,7 +33,7 @@
                         <items>
                             <Text
                                 class="arrows"
-                                text="{grid>score}">
+                                text="x{grid>x} y{grid>y}">
                                 <customData>
                                     <core:CustomData
                                         key="isempty"

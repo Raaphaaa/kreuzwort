@@ -24,20 +24,8 @@ sap.ui.define([], function () {
       // und Länge der möglichen Platzierung angeben
       this.possibilities = [];
       this.triedPossibilities = new Set();
-
-      console.log("Created ", this);
+      this._refreshPossibilities();
     }
-
-    // invalidate() {
-    //   this.generator.removeDummyFromGrid(this);
-    //   this.shaped = false;
-    //   this.startX = null;
-    //   this.startY = null;
-    //   this.direction = null;
-    //   this.horizontal = null;
-    //   this.length = null;
-    //   this._refreshPossibilities();
-    // }
 
     remove() {
       let field = this.generator.getField(this.x, this.y);
@@ -47,19 +35,18 @@ sap.ui.define([], function () {
       });
     }
 
-    shape(random = false) {
+    shape(random = false, direction = null, length = null) {
       // Dummy entfernen, damit die eigenen Buchstaben und dadurch gesetzten Hinweisfelder
       // nicht die Berechnung der möglichen Wortlängen/Richtungen beeinflussen
       if (this.shaped) {
         this.generator.removeDummyFromGrid(this);
-        console.log("Reshaped ", this);
       }
 
       this._refreshPossibilities();
       // Takes the best possibility and sets length/direction accordingly
       if (this.possibilities.length == 0) {
         this.remove();
-        return;
+        return true;
       }
 
       let temp, i;
@@ -67,16 +54,52 @@ sap.ui.define([], function () {
         i = this.generator.getRandomInt(0, this.possibilities.length - 1);
         temp = this.possibilities[i];
       } else {
-        temp = this.possibilities[0];
+        if (direction && length) {
+          for (i = 0; i < this.possibilities.length; i++) {
+            if (
+              this.possibilities[i].direction === direction &&
+              this.possibilities[i].length === length
+            ) {
+              temp = this.possibilities[i];
+              break;
+            }
+          }
+        } else {
+          temp = this.possibilities[0];
+        }
       }
+
       this.triedPossibilities.add(this._getPossibilityKey(temp));
-      this.shaped = true;
       this.startX = this._getStartX(temp.direction);
       this.startY = this._getStartY(temp.direction);
       this.horizontal = this._getHorizontal(temp.direction);
       this.direction = temp.direction;
       this.length = temp.length;
 
+      if (this.shaped) {
+        console.log(
+          "Reshaped X:" +
+            this.x +
+            " Y:" +
+            this.y +
+            " ---> Direction: " +
+            this.direction +
+            " Length: " +
+            this.length,
+        );
+      } else {
+        console.log(
+          "Shaped X:" +
+            this.x +
+            " Y:" +
+            this.y +
+            " - Direction: " +
+            this.direction +
+            " Length: " +
+            this.length,
+        );
+      }
+      this.shaped = true;
       this.generator.addDummyToGrid(this);
     }
 
@@ -114,9 +137,8 @@ sap.ui.define([], function () {
     }
 
     _evaluatePossibilities() {
-      //TODO in refreshPossibilities verschieben und direkt da machen;
-      // + zusätzlich extra Bewertung für die gesamte Richtung, bei der
-      // alle Längen zusammengerechnet werden, siehe kwr2/Generator/checkDirections
+      // TODO: Länge danach bewerten, welche Hinweisfelder dadurch forciert werden.
+      // Da auf Zeilen/Spalten gehen, wo x/y eine gerade Zahl ist und kleinen Bonus geben
       let that = this;
       for (let i = 0; i < that.possibilities.length; i++) {
         let possibility = that.possibilities[i];
@@ -126,83 +148,95 @@ sap.ui.define([], function () {
         let moveY = that._getMoveY(possibility.direction);
         let diagonalClueBonus = 0;
         let reservedBonus = 0;
+        let lengthBonus = 0;
+        let directionBonus = 0;
+        let parallelWordPenalty = 0;
         let score = 0;
 
         // Feldbewertungen
         for (let j = 0; j < possibility.length; j++) {
           score += that.generator.getEvaluation(x, y) / possibility.length;
+          let field = that.generator.getField(x, y);
+          if (field.isLetter) {
+            score += 0.1;
+          }
 
           // Beim letzten Feld nach angrenzenden Hinweisfeldern suchen. Hinweisfelder
           // sollten möglichst isoliert liegen und nicht nebeneinander. Daher ist es schlecht wenn das
           // Wort neben einem exitierenden Hinweisfeld endet.
           if (j === possibility.length - 1) {
-            diagonalClueBonus = that.generator.getDiagonalClues({
+            diagonalClueBonus = that.generator.getDiagonalClueBonus({
               x: x,
               y: y,
               horizontal: moveX > 0,
               startX: that._getStartX(possibility.direction),
               startY: that._getStartY(possibility.direction),
             });
+            // Längere Wörter mit gutem Endpunkt sind besser für die Struktur des Rätsels
+            diagonalClueBonus /=
+              that.generator.getMaxLength() - (possibility.length - 1);
 
+            // Die Wortlänge im nächsten Schleifendurchlauf ist min. 2 größer als die jetzige.
+            // D.h. es existiert ein Buchstabenfeld zwischen der jetzigen und nächsten Wortlänge.
+            // Dieses leere Feld eignet sich besonders gut für ein neues Hinweisfeld, daher Bonus geben
             if (
               that.possibilities[i + 1] &&
               that.possibilities[i + 1].direction === possibility.direction &&
               that.possibilities[i + 1].length - 1 != possibility.length
             ) {
-              reservedBonus = 0.5;
+              reservedBonus = 0.1;
             }
             // Bonus, falls das nächste Feld bereits ein Hinweisfeld ist.
-            reservedBonus += that.generator.checkFieldReserved(
+            reservedBonus += that.generator.getReservedFieldBonus(
               x + moveX,
               y + moveY,
-            )
-              ? 1
-              : 0;
+              possibility.length,
+            );
           }
           x += moveX;
           y += moveY;
         }
 
-        score += reservedBonus;
+        if (x % 2 == 0) {
+          score += 0.1;
+        }
+        if (y % 2 == 0) {
+          score += 0.1;
+        }
+        directionBonus = that.generator.getDirectionEvaluation(
+          possibility.direction,
+        );
+        lengthBonus = that.generator.getLengthBonus(possibility.length);
 
         // Je weniger Hinweisfelder diagonal vom letzten Wortfeld liegen, desto
         // besser & weniger Möglichkeiten, dass Hinweisfelder direkt nebeneinander liegen.
         score += diagonalClueBonus;
 
+        // Feld hinter dem Wort ist bereits als neues Hinweisfeld markiert oder schließt mit
+        // dem Rand vom Feld ab. Daher kleinerr Bonus, damit keine Lücken entstehen und Wörter mit
+        // dem Feldrand abschließen
+        score *= reservedBonus;
+
         // Richtungsbewertung für standardmäßig horizontale und vertikale Wörter
-        score *= that.generator.getDirectionEvaluation(possibility.direction);
+        score *= directionBonus;
 
         // Längenbonus zur Vermeidung zu vieler kurzer/langer Wörter
-        score += that.generator.getLengthBonus(possibility.length);
+        score *= lengthBonus;
 
-        // Check, ob parallel ein Wort verläuft, welches die gleiche Länge und Orientierung hat. Wäre
-        // schlecht für das Rätsel
-        if (
-          that.generator.checkParallelWord(
-            that.x,
-            that.y,
+        // Check, ob neben dem letzten Feld vom aktuellen Wort bereits ein anderes endet.
+        // Schlecht für die Struktur des Rätsels, wenn Wörter direkt nebeneinander enden, da
+        // dann auch Hinweisfelder zwangsweise direkt nebeneinander liegen.
+        // Wird ignoriert, wenn das nächste Feld bereits als Hinweisfeld markiert ist
+        if (reservedBonus <= 1) {
+          parallelWordPenalty = that.generator.getParallelWordScore(
+            x - moveX,
+            y - moveY,
             possibility.direction,
-            possibility.length,
-          )
-        ) {
-          score /= 2;
+          );
+
+          score *= parallelWordPenalty;
         }
         that.possibilities[i].score = parseFloat(score.toFixed(2));
-
-        console.log(
-          "direction ",
-          possibility.direction,
-          " length ",
-          possibility.length,
-          " has score ",
-          that.possibilities[i].score,
-          " diagonalClueScore ",
-          diagonalClueBonus,
-          " reservedBonus ",
-          reservedBonus,
-          " lengthBonus ",
-          that.generator.getLengthBonus(possibility.length),
-        );
       }
     }
 
@@ -238,7 +272,7 @@ sap.ui.define([], function () {
         directions.add("leftdown");
       }
       if (
-        x < 11 &&
+        x < this.generator.width - 1 &&
         grid[y][x + 1] &&
         !grid[y][x + 1].reserved &&
         (grid[y][x + 1].isEmpty || grid[y][x + 1].isLetter)
@@ -260,7 +294,7 @@ sap.ui.define([], function () {
         directions.add("upright");
       }
       if (
-        y < 11 &&
+        y < this.generator.height - 1 &&
         grid[y + 1][x] &&
         !grid[y + 1][x].reserved &&
         (grid[y + 1][x].isEmpty || grid[y + 1][x].isLetter)
@@ -336,6 +370,10 @@ sap.ui.define([], function () {
 
         let currentField = grid[y][x];
 
+        if (!that.generator.checkConstraintsForLetter(x, y, direction)) {
+          break;
+        }
+
         // continue when the current field is empty or a letter
         if (currentField.isEmpty || currentField.isLetter) {
           // check, if the next field would be within the grid. IF so, that
@@ -353,6 +391,7 @@ sap.ui.define([], function () {
             }
           } else {
             validLengths.push(length);
+            break;
           }
         }
         length++;
