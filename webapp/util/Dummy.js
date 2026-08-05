@@ -31,7 +31,13 @@ sap.ui.define([], function () {
       let field = this.generator.getField(this.x, this.y);
       this.generator.removeDummyFromGrid(this);
       field.forcedBy.forEach(function (dummy) {
-        dummy.shape();
+        // forcedBy kann auch Nicht-Dummy-Owner enthalten (z.B. den
+        // structuralForceKey des Generators für grid-strukturell erzwungene
+        // Felder, siehe Generator._markNewForcedFields) - die haben kein
+        // shape() und werden hier übersprungen.
+        if (dummy instanceof Dummy) {
+          dummy.shape();
+        }
       });
     }
 
@@ -386,8 +392,11 @@ sap.ui.define([], function () {
             // | | | | | |
             // |W|O|R|D|x|
             // | | | | | |
-            if (nextField.isEmpty || (!nextField.isEmpty && nextField.isClue)) {
+            if (nextField.isEmpty) {
               validLengths.push(length);
+            } else if (nextField.isClue) {
+              validLengths.push(length);
+              break;
             }
           } else {
             validLengths.push(length);

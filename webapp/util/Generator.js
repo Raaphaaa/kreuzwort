@@ -9,6 +9,10 @@ sap.ui.define(
         this.grid = [];
         this.gridEvaluation = [];
         this.dummys = [];
+        // Sentinel-Key für forcedBy-Einträge, die nicht von einem einzelnen
+        // (entfernbaren) Dummy stammen, sondern aus der Grid-Struktur selbst
+        // erzwungen werden (siehe _markNewForcedFields).
+        this._structuralForceKey = Symbol("structuralForce");
       }
 
       init() {
@@ -46,6 +50,48 @@ sap.ui.define(
 
       getLastDummy() {
         return this.dummys[this.dummys.length - 1];
+      }
+
+      // ---- Zentrale Feld-State-Verwaltung ----
+      // isEmpty/isLetter/isClue/hasHorizontalWord/hasVerticalWord sind aus
+      // clueFor/dummyHorizontal/dummyVertical abgeleitet. reserved/nextWordLocation
+      // sind aus forcedBy/markedBy abgeleitet. Beides wird ausschließlich über die
+      // folgenden Funktionen geschrieben, damit die Flags nie auseinanderlaufen
+      // können (siehe forcedBy/markedBy als "wer hält diesen Marker gerade").
+
+      _recomputeContentFlags(field) {
+        field.isClue = field.clueFor !== null;
+        field.isLetter =
+          field.dummyHorizontal !== null || field.dummyVertical !== null;
+        field.isEmpty = !field.isClue && !field.isLetter;
+        field.hasHorizontalWord = field.dummyHorizontal !== null;
+        field.hasVerticalWord = field.dummyVertical !== null;
+      }
+
+      _recomputeMarkers(field) {
+        field.reserved = field.forcedBy.size > 0;
+        field.nextWordLocation =
+          field.forcedBy.size > 0 || field.markedBy.size > 0;
+      }
+
+      // owner: der Dummy, der für diesen Marker verantwortlich ist. Wird der
+      // Dummy später entfernt/umgeformt, wird der Marker über _unmarkField
+      // wieder zurückgenommen. Für Marker, die aus der Grid-Struktur selbst
+      // entstehen (nicht an einen einzelnen Dummy gebunden), wird
+      // this._structuralForceKey als owner verwendet.
+      _markField(field, owner, { forced = false } = {}) {
+        if (forced) {
+          field.forcedBy.add(owner);
+        } else {
+          field.markedBy.add(owner);
+        }
+        this._recomputeMarkers(field);
+      }
+
+      _unmarkField(field, owner) {
+        field.forcedBy.delete(owner);
+        field.markedBy.delete(owner);
+        this._recomputeMarkers(field);
       }
 
       step() {
@@ -96,7 +142,9 @@ sap.ui.define(
           for (let y = 0; y < that.height; y++) {
             for (let x = 0; x < that.width; x++) {
               if (that.grid[y][x].isEmpty) {
-                that.grid[y][x].nextWordLocation = true;
+                that._markField(that.grid[y][x], that._structuralForceKey, {
+                  forced: false,
+                });
                 this.step();
               }
             }
@@ -118,6 +166,56 @@ sap.ui.define(
         this.updateGrid();
       }
 
+      // Ermittelt, welche Dummys für ein konfliktverursachendes Feld verantwortlich
+      // sind (Wort auf dem Feld selbst, oder - bei leeren "unmöglichen" Feldern wie
+      // bei Randkonstellationen - die Wörter auf den direkten Nachbarfeldern).
+      _getResponsibleDummys(field) {
+        let dummys = new Set();
+        let addFromField = (f) => {
+          if (!f) return;
+          if (f.clueFor) dummys.add(f.clueFor);
+          if (f.dummyHorizontal) dummys.add(f.dummyHorizontal);
+          if (f.dummyVertical) dummys.add(f.dummyVertical);
+          f.forcedBy.forEach((d) => {
+            if (d instanceof Dummy) dummys.add(d);
+          });
+        };
+        addFromField(field);
+        if (field.isEmpty) {
+          let x = field.x,
+            y = field.y;
+          if (x > 0) addFromField(this.grid[y][x - 1]);
+          if (x < this.width - 1) addFromField(this.grid[y][x + 1]);
+          if (y > 0) addFromField(this.grid[y - 1][x]);
+          if (y < this.height - 1) addFromField(this.grid[y + 1][x]);
+        }
+        return dummys;
+      }
+
+      // Wählt aus den für die gegebenen Konfliktfelder verantwortlichen Dummys
+      // denjenigen aus, der zeitlich zuletzt platziert wurde - das minimiert,
+      // wie viel vom bisher aufgebauten Grid durch das Reshapen verworfen wird.
+      // Kann kein verantwortlicher Dummy ermittelt werden, wird wie bisher der
+      // zuletzt platzierte Dummy insgesamt genommen.
+      _pickBacktrackTarget(fields) {
+        let that = this;
+        let candidates = new Set();
+        fields.forEach((field) => {
+          that._getResponsibleDummys(field).forEach((d) => candidates.add(d));
+        });
+
+        let best = null;
+        let bestIndex = -1;
+        candidates.forEach((d) => {
+          let idx = that.dummys.indexOf(d);
+          if (idx > bestIndex) {
+            bestIndex = idx;
+            best = d;
+          }
+        });
+        return best || this.getLastDummy();
+      }
+
       _validateGrid() {
         // Gesetzte Buchstabenfelder suchen, die in der verbleibenden Richtung
         // keine Möglichkeit mehr haben, einem Wort zugeordnet zu werden.
@@ -128,8 +226,8 @@ sap.ui.define(
         if (constraints.length > 0) {
           console.log("Impossible to fill:", constraints);
           // Dummy hat keine Möglichkeiten mehr für neue Formen offen
-          if (this.getLastDummy().shape()) {
-            console.log("Last dummy has no possibilities left");
+          if (this._pickBacktrackTarget(constraints).shape()) {
+            console.log("Backtrack target has no possibilities left");
           }
           this._validateGrid();
         } else {
@@ -146,7 +244,7 @@ sap.ui.define(
           let clueClumps = this._validateClueClumps();
           if (clueClumps.length > 0) {
             console.log("TOO MANY ADJACENT CLUE FIELDS FOUND: ", clueClumps);
-            this.getLastDummy().shape();
+            this._pickBacktrackTarget(clueClumps.flat()).shape();
             this._validateGrid();
           } else {
             console.log("OK clues");
@@ -159,7 +257,7 @@ sap.ui.define(
           // 1.Versuch: Konstellation fixen
           if (!this._fixEdges(impossibleEdges)) {
             // 2. Versuch: den Dummy, der die Konstellation verursacht neu generieren
-            this.getLastDummy().shape();
+            this._pickBacktrackTarget(impossibleEdges).shape();
           }
           this._validateGrid();
         } else {
@@ -247,10 +345,17 @@ sap.ui.define(
 
         // TODO: Wichtig: Die müssen irgendwie wieder entfernt werden bei jedem Cycle
         let that = this;
-        let forcedFields = this._getForcedFields();
+        let forcedFields = this._getForcedFields().concat(
+          this._getEncasedFields(),
+        );
         forcedFields.forEach(function (field) {
-          that.grid[field.y][field.x].nextWordLocation = true;
-          that.grid[field.y][field.x].reserved = true;
+          that._markField(
+            that.grid[field.y][field.x],
+            that._structuralForceKey,
+            {
+              forced: true,
+            },
+          );
         });
         if (forcedFields.length > 0) {
           console.log("Updated fields to FORCED", forcedFields);
@@ -322,6 +427,45 @@ sap.ui.define(
           }
         });
         return forcedFields;
+      }
+
+      _getEncasedFields() {
+        // returns empty Fields that are surrounded by 3 Clue fields and/or edges of the grid in
+        // the following constellations:
+        // |   | C |   |            |   | C |   |
+        // | C | x | C |            | C | X |   |
+        // |   |   |   |            |   | C |   |
+        let that = this;
+        let encased = [];
+
+        this.grid.forEach(function (row) {
+          row.forEach(function (field) {
+            if (!field.isEmpty) {
+              return;
+            }
+            // count adjacent edges/clue fields
+            let evaluation = that.gridEvaluation[field.y][field.x];
+            if (evaluation.edges + evaluation.clues !== 3) {
+              return;
+            }
+
+            let below =
+              field.y < that.height - 1
+                ? that.grid[field.y + 1][field.x]
+                : null;
+            let right =
+              field.x < that.width - 1 ? that.grid[field.y][field.x + 1] : null;
+
+            // check, if the open side is below or to the right
+            if (below && !below.isClue && below.isEmpty) {
+              encased.push(field);
+            } else if (right && !right.isClue && right.isEmpty) {
+              encased.push(field);
+            }
+          });
+        });
+
+        return encased;
       }
 
       _canForceField(field, forcedFieldKeys, orientation) {
@@ -1350,6 +1494,7 @@ sap.ui.define(
 
       removeLastWord() {
         this.removeDummyFromGrid(this.dummys[this.dummys.length - 1]);
+        this.updateGrid();
       }
 
       updateGrid() {
@@ -1364,56 +1509,45 @@ sap.ui.define(
         this._addDummyLetters(dummy);
         this._markForcedWordLocations(dummy);
         this._markOptionalWordLocations(dummy);
-        this.updateGrid();
+        this._evaluateGrid();
         // console.log("Added ", dummy);
       }
 
       _addDummyLetters(dummy) {
         let that = this;
-        this.grid[dummy.y][dummy.x].isEmpty = false;
-        this.grid[dummy.y][dummy.x].isLetter = false;
-        this.grid[dummy.y][dummy.x].isClue = true;
-        this.grid[dummy.y][dummy.x].clueFor = dummy;
+        let clueField = this.grid[dummy.y][dummy.x];
+        clueField.clueFor = dummy;
+        this._recomputeContentFlags(clueField);
 
         // fields for the letters of the word
         for (let j = 0; j < dummy.length; j++) {
           let x = dummy.startX + (dummy.horizontal ? j : 0);
           let y = dummy.startY + (dummy.horizontal ? 0 : j);
           let field = this.grid[y][x];
-          field.isEmpty = false;
-          field.isLetter = true;
 
           if (dummy.horizontal) {
-            field.hasHorizontalWord = true;
             field.dummyHorizontal = dummy;
+            this._recomputeContentFlags(field);
             if (
               that.grid[y - 1] &&
               that.grid[y - 1][x].isClue &&
               that.grid[y + 1] &&
               that.grid[y + 1][x].isEmpty
             ) {
-              that.grid[y + 1][x].reserved = true;
-              that.grid[y + 1][x].nextWordLocation = true;
-              that.grid[y + 1][x].forcedBy.add(dummy);
-              that.grid[y + 1][x].markedBy.add(dummy);
+              that._markField(that.grid[y + 1][x], dummy, { forced: true });
             }
           } else {
-            field.hasVerticalWord = true;
             field.dummyVertical = dummy;
+            this._recomputeContentFlags(field);
             if (
               that.grid[y][x - 1] &&
               that.grid[y][x - 1].isClue &&
               that.grid[y][x + 1] &&
               that.grid[y][x + 1].isEmpty
             ) {
-              that.grid[y][x + 1].reserved = true;
-              that.grid[y][x + 1].nextWordLocation = true;
-              that.grid[y][x + 1].forcedBy.add(dummy);
-              that.grid[y][x + 1].markedBy.add(dummy);
+              that._markField(that.grid[y][x + 1], dummy, { forced: true });
             }
           }
-
-          this.grid[y][x] = field;
         }
       }
 
@@ -1428,7 +1562,6 @@ sap.ui.define(
         //    marker: Describes a field, that is marked as a possible location for the next word. If in a
         //            certain position, there has to be a clue/word placed in that spot, indicated by <reserved>
         let that = this;
-        let aLocations = [];
         if (dummy.horizontal) {
           // Word and clue not in a straight line, marker 2 fields next to the clue as a possible location
           if (dummy.y != dummy.startY) {
@@ -1440,10 +1573,9 @@ sap.ui.define(
                 that.grid[dummy.y - 2] &&
                 that.grid[dummy.y - 2][dummy.x].isEmpty
               ) {
-                that.grid[dummy.y - 2][dummy.x].nextWordLocation = true;
-                that.grid[dummy.y - 2][dummy.x].reserved = true;
-                that.grid[dummy.y - 2][dummy.x].forcedBy.add(dummy);
-                that.grid[dummy.y - 2][dummy.x].markedBy.add(dummy);
+                that._markField(that.grid[dummy.y - 2][dummy.x], dummy, {
+                  forced: true,
+                });
               }
             } else {
               // |C| | | |
@@ -1453,10 +1585,10 @@ sap.ui.define(
                 that.grid[dummy.y + 2] &&
                 that.grid[dummy.y + 2][dummy.x].isEmpty
               ) {
-                that.grid[dummy.y + 2][dummy.x].nextWordLocation = true;
-                that.grid[dummy.y + 2][dummy.x].reserved = true; // experimentell TODO:evtl. false setzen
-                that.grid[dummy.y + 2][dummy.x].forcedBy.add(dummy);
-                that.grid[dummy.y + 2][dummy.x].markedBy.add(dummy);
+                // experimentell TODO:evtl. forced: false setzen
+                that._markField(that.grid[dummy.y + 2][dummy.x], dummy, {
+                  forced: true,
+                });
               }
             }
           }
@@ -1466,16 +1598,10 @@ sap.ui.define(
             // | | | | | |
             // |W|O|R|D|#|
             // | | | | | |
-            that.grid[dummy.startY][
-              dummy.startX + dummy.length
-            ].nextWordLocation = true;
-            that.grid[dummy.startY][dummy.startX + dummy.length].reserved =
-              true;
-            that.grid[dummy.startY][dummy.startX + dummy.length].forcedBy.add(
+            that._markField(
+              that.grid[dummy.startY][dummy.startX + dummy.length],
               dummy,
-            );
-            that.grid[dummy.startY][dummy.startX + dummy.length].markedBy.add(
-              dummy,
+              { forced: true },
             );
             if (
               dummy.startY == 1 &&
@@ -1489,10 +1615,11 @@ sap.ui.define(
               // | | | | |#|
               // |W|O|R|D|+|
               // | | | | | |
-              that.grid[0][dummy.startX + dummy.length].nextWordLocation = true;
-              that.grid[0][dummy.startX + dummy.length].reserved = true;
-              that.grid[0][dummy.startX + dummy.length].forcedBy.add(dummy);
-              that.grid[0][dummy.startX + dummy.length].markedBy.add(dummy);
+              that._markField(
+                that.grid[0][dummy.startX + dummy.length],
+                dummy,
+                { forced: true },
+              );
             }
           }
           if (that.grid[dummy.startY][dummy.startX - 1]) {
@@ -1503,10 +1630,11 @@ sap.ui.define(
             // Feld vor dem Wort als Pflichtfeld markieren, wenn das Hinweisfeld darüber/darunter in
             // der Zeile liegt
             if (dummy.startY != dummy.y) {
-              that.grid[dummy.startY][dummy.startX - 1].nextWordLocation = true;
-              that.grid[dummy.startY][dummy.startX - 1].reserved = true;
-              that.grid[dummy.startY][dummy.startX - 1].forcedBy.add(dummy);
-              that.grid[dummy.startY][dummy.startX - 1].markedBy.add(dummy);
+              that._markField(
+                that.grid[dummy.startY][dummy.startX - 1],
+                dummy,
+                { forced: true },
+              );
             }
 
             if (dummy.startY == 1 && that.grid[0][dummy.startX - 1].isEmpty) {
@@ -1518,10 +1646,9 @@ sap.ui.define(
               // |#| | | | |
               // |+|W|O|R|D|
               // | | | | | |
-              that.grid[0][dummy.startX - 1].nextWordLocation = true;
-              that.grid[0][dummy.startX - 1].reserved = true;
-              that.grid[0][dummy.startX - 1].forcedBy.add(dummy);
-              that.grid[0][dummy.startX - 1].markedBy.add(dummy);
+              that._markField(that.grid[0][dummy.startX - 1], dummy, {
+                forced: true,
+              });
             }
           }
 
@@ -1534,10 +1661,9 @@ sap.ui.define(
                 that.grid[dummy.y + 2] &&
                 that.grid[dummy.y + 2][dummy.x].isEmpty
               ) {
-                that.grid[dummy.y + 2][dummy.x].nextWordLocation = true;
-                that.grid[dummy.y + 2][dummy.x].reserved = true;
-                that.grid[dummy.y + 2][dummy.x].forcedBy.add(dummy);
-                that.grid[dummy.y + 2][dummy.x].markedBy.add(dummy);
+                that._markField(that.grid[dummy.y + 2][dummy.x], dummy, {
+                  forced: true,
+                });
               }
             }
           }
@@ -1552,59 +1678,53 @@ sap.ui.define(
                 that.grid[dummy.y][dummy.x - 2] &&
                 that.grid[dummy.y][dummy.x - 2].isEmpty
               ) {
-                that.grid[dummy.y][dummy.x - 2].nextWordLocation = true;
-                that.grid[dummy.y][dummy.x - 2].reserved = true;
-                that.grid[dummy.y][dummy.x - 2].forcedBy.add(dummy);
-                that.grid[dummy.y][dummy.x - 2].markedBy.add(dummy);
+                that._markField(that.grid[dummy.y][dummy.x - 2], dummy, {
+                  forced: true,
+                });
               }
             } else {
               if (
                 that.grid[dummy.y][dummy.x + 2] &&
                 that.grid[dummy.y][dummy.x + 2].isEmpty
               ) {
-                that.grid[dummy.y][dummy.x + 2].nextWordLocation = true;
-                that.grid[dummy.y][dummy.x + 2].reserved = true; // experimentell TODO:evtl. false setzen
-                that.grid[dummy.y][dummy.x + 2].forcedBy.add(dummy);
-                that.grid[dummy.y][dummy.x + 2].markedBy.add(dummy);
+                // experimentell TODO:evtl. forced: false setzen
+                that._markField(that.grid[dummy.y][dummy.x + 2], dummy, {
+                  forced: true,
+                });
               }
             }
           }
           if (that.grid[dummy.startY + dummy.length]) {
-            that.grid[dummy.startY + dummy.length][
-              dummy.startX
-            ].nextWordLocation = true;
-            that.grid[dummy.startY + dummy.length][dummy.startX].reserved =
-              true;
-            that.grid[dummy.startY + dummy.length][dummy.startX].forcedBy.add(
+            that._markField(
+              that.grid[dummy.startY + dummy.length][dummy.startX],
               dummy,
-            );
-            that.grid[dummy.startY + dummy.length][dummy.startX].markedBy.add(
-              dummy,
+              { forced: true },
             );
             if (
               dummy.startX == 1 &&
               that.grid[dummy.startY + dummy.length][0].isEmpty
             ) {
-              that.grid[dummy.startY + dummy.length][0].nextWordLocation = true;
-              that.grid[dummy.startY + dummy.length][0].reserved = true;
-              that.grid[dummy.startY + dummy.length][0].forcedBy.add(dummy);
-              that.grid[dummy.startY + dummy.length][0].markedBy.add(dummy);
+              that._markField(
+                that.grid[dummy.startY + dummy.length][0],
+                dummy,
+                { forced: true },
+              );
             }
           }
 
           if (that.grid[dummy.startY - 1]) {
             if (dummy.startX != dummy.x) {
-              that.grid[dummy.startY - 1][dummy.startX].nextWordLocation = true;
-              that.grid[dummy.startY - 1][dummy.startX].reserved = true;
-              that.grid[dummy.startY - 1][dummy.startX].forcedBy.add(dummy);
-              that.grid[dummy.startY - 1][dummy.startX].markedBy.add(dummy);
+              that._markField(
+                that.grid[dummy.startY - 1][dummy.startX],
+                dummy,
+                { forced: true },
+              );
             }
 
             if (dummy.startX == 1 && that.grid[dummy.startY - 1][0].isEmpty) {
-              that.grid[dummy.startY - 1][0].nextWordLocation = true;
-              that.grid[dummy.startY - 1][0].reserved = true;
-              that.grid[dummy.startY - 1][0].forcedBy.add(dummy);
-              that.grid[dummy.startY - 1][0].markedBy.add(dummy);
+              that._markField(that.grid[dummy.startY - 1][0], dummy, {
+                forced: true,
+              });
             }
           }
 
@@ -1617,10 +1737,9 @@ sap.ui.define(
                 that.grid[dummy.y][dummy.x + 2] &&
                 that.grid[dummy.y][dummy.x + 2].isEmpty
               ) {
-                that.grid[dummy.y][dummy.x + 2].nextWordLocation = true;
-                that.grid[dummy.y][dummy.x + 2].reserved = true;
-                that.grid[dummy.y][dummy.x + 2].forcedBy.add(dummy);
-                that.grid[dummy.y][dummy.x + 2].markedBy.add(dummy);
+                that._markField(that.grid[dummy.y][dummy.x + 2], dummy, {
+                  forced: true,
+                });
               }
             }
           }
@@ -1640,9 +1759,9 @@ sap.ui.define(
             that.grid[dummy.y][dummy.x + 2] &&
             that.grid[dummy.y][dummy.x + 2].isEmpty
           ) {
-            that.grid[dummy.y][dummy.x + 2].nextWordLocation = true;
-            // that.grid[dummy.y][dummy.x + 2].reserved = false;
-            that.grid[dummy.y][dummy.x + 2].markedBy.add(dummy);
+            that._markField(that.grid[dummy.y][dummy.x + 2], dummy, {
+              forced: false,
+            });
           }
         } else {
           if (
@@ -1650,9 +1769,9 @@ sap.ui.define(
             that.grid[dummy.y + 2][dummy.x] &&
             that.grid[dummy.y + 2][dummy.x].isEmpty
           ) {
-            that.grid[dummy.y + 2][dummy.x].nextWordLocation = true;
-            // that.grid[dummy.y + 2][dummy.x].reserved = false;
-            that.grid[dummy.y + 2][dummy.x].markedBy.add(dummy);
+            that._markField(that.grid[dummy.y + 2][dummy.x], dummy, {
+              forced: false,
+            });
           }
         }
 
@@ -1676,12 +1795,9 @@ sap.ui.define(
               }
             }
             if (minY >= 0 && that.grid[minY][x].isEmpty) {
-              that.grid[minY][x].nextWordLocation = true;
-              that.grid[minY][x].reserved = false;
-              that.grid[minY][x].markedBy.add(dummy);
+              that._markField(that.grid[minY][x], dummy, { forced: false });
               if (x == 1 && that.grid[minY][0].isEmpty) {
-                that.grid[minY][0].nextWordLocation = true;
-                that.grid[minY][0].reserved = true;
+                that._markField(that.grid[minY][0], dummy, { forced: true });
               }
             }
           }
@@ -1701,12 +1817,9 @@ sap.ui.define(
               }
             }
             if (minX >= 0 && that.grid[y][minX].isEmpty) {
-              that.grid[y][minX].nextWordLocation = true;
-              that.grid[y][minX].reserved = false;
-              that.grid[y][minX].markedBy.add(dummy);
+              that._markField(that.grid[y][minX], dummy, { forced: false });
               if (y == 1 && that.grid[0][minX].isEmpty) {
-                that.grid[0][minX].nextWordLocation = true;
-                that.grid[0][minX].reserved = true;
+                that._markField(that.grid[0][minX], dummy, { forced: true });
               }
             }
           }
@@ -1719,16 +1832,15 @@ sap.ui.define(
         if (this.dummys.indexOf(dummy) != -1) {
           this.dummys.splice(this.dummys.indexOf(dummy), 1);
         }
-        this.updateGrid();
-        // console.log("Removed ", dummy);
+        this._evaluateGrid();
+        console.log("Removed ", dummy);
       }
 
       _removeDummyLetters(dummy) {
         // clue field
-        this.grid[dummy.y][dummy.x].isEmpty = true;
-        this.grid[dummy.y][dummy.x].isLetter = false;
-        this.grid[dummy.y][dummy.x].isClue = false;
-        this.grid[dummy.y][dummy.x].clueFor = null;
+        let clueField = this.grid[dummy.y][dummy.x];
+        clueField.clueFor = null;
+        this._recomputeContentFlags(clueField);
 
         // fields for the letters of the word
         for (let j = 0; j < dummy.length; j++) {
@@ -1736,23 +1848,12 @@ sap.ui.define(
           let y = dummy.startY + (dummy.horizontal ? 0 : j);
           let field = this.grid[y][x];
 
-          if (
-            (dummy.horizontal && !field.hasVerticalWord) ||
-            (!dummy.horizontal && !field.hasHorizontalWord)
-          ) {
-            field.isEmpty = true;
-            field.isLetter = false;
-          }
-
           if (dummy.horizontal) {
             field.dummyHorizontal = null;
-            field.hasHorizontalWord = false;
           } else {
             field.dummyVertical = null;
-            field.hasVerticalWord = false;
           }
-
-          this.grid[y][x] = field;
+          this._recomputeContentFlags(field);
         }
       }
 
@@ -1760,20 +1861,7 @@ sap.ui.define(
         let that = this;
         this.grid.forEach(function (row) {
           row.forEach(function (field) {
-            // Entfernen aller forcierten Marker
-            if (field.forcedBy.delete(dummy) && field.forcedBy.size == 0) {
-              if (field.markedBy.size == 0) {
-                field.nextWordLocation = false;
-              }
-              field.reserved = false;
-            }
-
-            // Entfernen aller optionalen Marker
-            if (field.markedBy.delete(dummy) && field.markedBy.size == 0) {
-              field.nextWordLocation = false;
-            }
-
-            that.grid[field.y][field.x] = field;
+            that._unmarkField(field, dummy);
           });
         });
         this._markNewForcedFields();
