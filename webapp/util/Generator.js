@@ -94,6 +94,23 @@ sap.ui.define(
         this._recomputeMarkers(field);
       }
 
+      // true, wenn das Feld durch etwas anderes als die strukturelle Ableitung
+      // selbst reserviert ist (also durch einen echten, platzierten Dummy).
+      // Nur in diesem Fall ist die Position wirklich "extern" schon geklärt.
+      // Ist ein Feld ausschließlich über structuralForceKey reserviert, soll
+      // es bei jeder Neuermittlung weiterhin als offener Kandidat gelten,
+      // damit _getForcedFields()/_getEncasedFields() bei jedem Aufruf den
+      // vollständigen, aktuell korrekten Stand liefern (nicht nur neu
+      // hinzugekommene Fälle) und sich so für einen Abgleich eignen.
+      _isReservedByOther(field) {
+        for (const owner of field.forcedBy) {
+          if (owner !== this._structuralForceKey) {
+            return true;
+          }
+        }
+        return false;
+      }
+
       step() {
         let that = this,
           location,
@@ -158,10 +175,6 @@ sap.ui.define(
         }
 
         this._validateGrid();
-
-        // Markieren von neuen Felder als forcierte Hinweisfelder. Kann dadurch entstehen,
-        // dass aufeinanderfolgende Buchstaben nur noch auf ein einziges verbleibendes Feld zeigen
-        this._markNewForcedFields();
 
         this.updateGrid();
       }
@@ -339,27 +352,39 @@ sap.ui.define(
         return false;
       }
 
-      _markNewForcedFields() {
-        // Nachdem das Grid validiert wurde, wird nach Positionen gesucht, die durch das
-        // neu hinzugefügte Wort zu forcierten Hinweisfeldern werden.
-
-        // TODO: Wichtig: Die müssen irgendwie wieder entfernt werden bei jedem Cycle
+      _markStructuralForcedFields() {
+        // Ermittelt die aktuell korrekte Menge an strukturell erzwungenen
+        // Feldern neu (_getForcedFields/_getEncasedFields sind dank
+        // _isReservedByOther bei jedem Aufruf stabil/vollständig, nicht nur
+        // additiv) und gleicht sie mit dem bisherigen structuralForceKey-Stand
+        // ab: alles, was nicht mehr in der aktuellen Menge ist, wird entmarkiert,
+        // alles darin enthaltene markiert.
         let that = this;
         let forcedFields = this._getForcedFields().concat(
           this._getEncasedFields(),
         );
-        forcedFields.forEach(function (field) {
-          that._markField(
-            that.grid[field.y][field.x],
-            that._structuralForceKey,
-            {
-              forced: true,
-            },
-          );
+        let forcedFieldKeys = new Set(
+          forcedFields.map((field) => field.x + "," + field.y),
+        );
+
+        // aktuelle strukturell bedingte reservierte felder wieder entmarkieren
+        this.grid.forEach(function (row) {
+          row.forEach(function (field) {
+            if (
+              field.forcedBy.has(that._structuralForceKey) &&
+              !forcedFieldKeys.has(field.x + "," + field.y)
+            ) {
+              that._unmarkField(field, that._structuralForceKey);
+            }
+          });
         });
+
+        forcedFields.forEach(function (field) {
+          that._markField(field, that._structuralForceKey, { forced: true });
+        });
+
         if (forcedFields.length > 0) {
           console.log("Updated fields to FORCED", forcedFields);
-          // TODO diese Felder wieder resetten
         }
       }
 
@@ -486,7 +511,7 @@ sap.ui.define(
             above &&
             !above.isClue &&
             above.nextWordLocation &&
-            !above.reserved
+            !this._isReservedByOther(above)
           ) {
             if (!forcedFieldKeys.has(above.x + "," + above.y + ",horizontal")) {
               return false;
@@ -497,7 +522,7 @@ sap.ui.define(
             below &&
             !below.isClue &&
             below.nextWordLocation &&
-            !below.reserved
+            !this._isReservedByOther(below)
           ) {
             if (!forcedFieldKeys.has(below.x + "," + below.y + ",horizontal")) {
               return false;
@@ -511,13 +536,17 @@ sap.ui.define(
             right = this.grid[field.y][field.x + 1];
           }
 
-          if (left && left.nextWordLocation && !left.reserved) {
+          if (left && left.nextWordLocation && !this._isReservedByOther(left)) {
             if (!forcedFieldKeys.has(left.x + "," + left.y + ",vertical")) {
               return false;
             }
           }
 
-          if (right && right.nextWordLocation && !right.reserved) {
+          if (
+            right &&
+            right.nextWordLocation &&
+            !this._isReservedByOther(right)
+          ) {
             if (!forcedFieldKeys.has(right.x + "," + right.y + ",vertical")) {
               return false;
             }
@@ -550,16 +579,20 @@ sap.ui.define(
             continue;
           }
 
+          let reservedByOther = that._isReservedByOther(current);
+
           if (
             current.isEmpty &&
             !current.nextWordLocation &&
-            !current.reserved
+            !reservedByOther
           ) {
             candidate = null;
             break;
           }
-          // Feld bereits als forciert hinterlegt
-          if (current.isEmpty && current.reserved) {
+          // Feld bereits durch etwas anderes als die strukturelle Ableitung
+          // selbst reserviert (z.B. einen platzierten Dummy) - hier ist nichts
+          // mehr zu klären.
+          if (current.isEmpty && reservedByOther) {
             candidate = null;
             break;
           }
@@ -567,11 +600,10 @@ sap.ui.define(
           // Feld hinterlegt wird. Es besteht aber auch die Möglichkeit, dass hinter dem gefundenen
           // Hinweisfeld ein weiteres liegt. Dann gibt es min. 2 Möglichkeiten für ein Wort
           // in dieser Richtung --> kann ignoriert werden.
-          if (
-            current.isEmpty &&
-            current.nextWordLocation &&
-            !current.reserved
-          ) {
+          // Gilt auch, wenn das Feld aktuell schon ausschließlich strukturell
+          // reserviert ist - das wird hier bei jedem Aufruf neu bestätigt statt
+          // nur einmalig additiv gesetzt.
+          if (current.isEmpty && current.nextWordLocation && !reservedByOther) {
             if (candidate != null) {
               candidate = null;
               break;
@@ -1510,6 +1542,7 @@ sap.ui.define(
         this._markForcedWordLocations(dummy);
         this._markOptionalWordLocations(dummy);
         this._evaluateGrid();
+        this._markStructuralForcedFields();
         // console.log("Added ", dummy);
       }
 
@@ -1833,6 +1866,7 @@ sap.ui.define(
           this.dummys.splice(this.dummys.indexOf(dummy), 1);
         }
         this._evaluateGrid();
+        this._markStructuralForcedFields();
         console.log("Removed ", dummy);
       }
 
@@ -1864,7 +1898,6 @@ sap.ui.define(
             that._unmarkField(field, dummy);
           });
         });
-        this._markNewForcedFields();
       }
     };
   },
