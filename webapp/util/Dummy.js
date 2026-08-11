@@ -110,9 +110,10 @@ sap.ui.define([], function () {
     }
 
     _refreshPossibilities() {
-      let directions = this._getValidDirections();
       let that = this;
       this.possibilities = [];
+
+      let directions = this._getValidDirections();
 
       directions.forEach(function (direction) {
         let lengths = that._getValidLengths(direction);
@@ -204,13 +205,15 @@ sap.ui.define([], function () {
         }
 
         if (x % 2 == 0) {
-          score += 0.1;
+          score += x > 7 ? 0.1 : 0.2;
         }
         if (y % 2 == 0) {
-          score += 0.1;
+          score += y > 7 ? 0.1 : 0.2;
         }
         directionBonus = that.generator.getDirectionEvaluation(
           possibility.direction,
+          this.x,
+          this.y,
         );
         lengthBonus = that.generator.getLengthBonus(possibility.length);
 
@@ -232,16 +235,14 @@ sap.ui.define([], function () {
         // Check, ob neben dem letzten Feld vom aktuellen Wort bereits ein anderes endet.
         // Schlecht für die Struktur des Rätsels, wenn Wörter direkt nebeneinander enden, da
         // dann auch Hinweisfelder zwangsweise direkt nebeneinander liegen.
-        // Wird ignoriert, wenn das nächste Feld bereits als Hinweisfeld markiert ist
-        if (reservedBonus <= 1) {
-          parallelWordPenalty = that.generator.getParallelWordScore(
-            x - moveX,
-            y - moveY,
-            possibility.direction,
-          );
+        // Wird vermindert, wenn das nächste Feld bereits als Hinweisfeld markiert ist
 
-          score *= parallelWordPenalty;
-        }
+        parallelWordPenalty = that.generator.getParallelWordScore(
+          x - moveX,
+          y - moveY,
+          possibility.direction,
+        );
+        score *= parallelWordPenalty;
         that.possibilities[i].score = parseFloat(score.toFixed(2));
       }
     }
@@ -375,6 +376,10 @@ sap.ui.define([], function () {
         }
 
         let currentField = grid[y][x];
+
+        if (currentField.isClue) {
+          break;
+        }
 
         if (!that.generator.checkConstraintsForLetter(x, y, direction)) {
           break;

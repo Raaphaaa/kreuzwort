@@ -174,9 +174,14 @@ sap.ui.define(
           dummy.shape();
         }
 
+        // this.updateGrid();
+
         this._validateGrid();
+        this._markStructuralForcedFields();
 
         this.updateGrid();
+
+        console.log("------------------------------------------------");
       }
 
       // Ermittelt, welche Dummys für ein konfliktverursachendes Feld verantwortlich
@@ -213,19 +218,22 @@ sap.ui.define(
       _pickBacktrackTarget(fields) {
         let that = this;
         let candidates = new Set();
-        fields.forEach((field) => {
-          that._getResponsibleDummys(field).forEach((d) => candidates.add(d));
-        });
-
         let best = null;
         let bestIndex = -1;
-        candidates.forEach((d) => {
-          let idx = that.dummys.indexOf(d);
-          if (idx > bestIndex) {
-            bestIndex = idx;
-            best = d;
-          }
-        });
+
+        if (fields && fields.length > 0) {
+          fields.forEach((field) => {
+            that._getResponsibleDummys(field).forEach((d) => candidates.add(d));
+          });
+
+          candidates.forEach((d) => {
+            let idx = that.dummys.indexOf(d);
+            if (idx > bestIndex) {
+              bestIndex = idx;
+              best = d;
+            }
+          });
+        }
         return best || this.getLastDummy();
       }
 
@@ -244,7 +252,7 @@ sap.ui.define(
           }
           this._validateGrid();
         } else {
-          console.log("OK letters");
+          // console.log("OK letters");
         }
 
         // Experimentell: Maximale Anzahl an benachbarten (auch diagonal) liegenden Hinweisfeldern
@@ -260,7 +268,7 @@ sap.ui.define(
             this._pickBacktrackTarget(clueClumps.flat()).shape();
             this._validateGrid();
           } else {
-            console.log("OK clues");
+            // console.log("OK clues");
           }
         }
 
@@ -274,7 +282,14 @@ sap.ui.define(
           }
           this._validateGrid();
         } else {
-          console.log("OK edges");
+          // console.log("OK edges");
+        }
+
+        let blockedFields = this._getBlockedFields();
+        if (blockedFields.length > 0) {
+          console.log("BLOCKED FIELDS FOUND: ", blockedFields);
+          this._pickBacktrackTarget().shape();
+          this._validateGrid();
         }
       }
 
@@ -352,6 +367,24 @@ sap.ui.define(
         return false;
       }
 
+      _getBlockedFields() {
+        let that = this;
+        let blocked = [];
+        this.grid.forEach(function (row) {
+          row.forEach(function (field) {
+            if (!field.isEmpty) {
+              return;
+            }
+            let evaluation = that.gridEvaluation[field.y][field.x];
+            if (evaluation.edges + evaluation.blocked === 4) {
+              blocked.push(field);
+            }
+          });
+        });
+
+        return blocked;
+      }
+
       _markStructuralForcedFields() {
         // Ermittelt die aktuell korrekte Menge an strukturell erzwungenen
         // Feldern neu (_getForcedFields/_getEncasedFields sind dank
@@ -360,9 +393,11 @@ sap.ui.define(
         // ab: alles, was nicht mehr in der aktuellen Menge ist, wird entmarkiert,
         // alles darin enthaltene markiert.
         let that = this;
-        let forcedFields = this._getForcedFields().concat(
-          this._getEncasedFields(),
-        );
+        let forcedFields = this._getForcedFields();
+        let encasedFields = this._getEncasedFields();
+        let oppositeForcedFields = this._getOppositeForcedFields();
+
+        forcedFields = forcedFields.concat(encasedFields, oppositeForcedFields);
         let forcedFieldKeys = new Set(
           forcedFields.map((field) => field.x + "," + field.y),
         );
@@ -482,15 +517,62 @@ sap.ui.define(
               field.x < that.width - 1 ? that.grid[field.y][field.x + 1] : null;
 
             // check, if the open side is below or to the right
-            if (below && !below.isClue && below.isEmpty) {
+            if (below && !below.isClue) {
               encased.push(field);
-            } else if (right && !right.isClue && right.isEmpty) {
+            } else if (right && !right.isClue) {
               encased.push(field);
             }
           });
         });
 
         return encased;
+      }
+
+      _getOppositeForcedFields() {
+        let that = this;
+        let opposites = [];
+        this.dummys.forEach(function (dummy) {
+          let y = dummy.y;
+          let x = dummy.x;
+          let valid = true;
+
+          if (
+            that.grid[y + 1] &&
+            that.grid[y + 1][x].isLetter &&
+            that.grid[y + 2] &&
+            that.grid[y + 2][x].isEmpty
+          ) {
+            if (x > 0 && that.grid[y + 1][x - 1].isEmpty) {
+              valid = false;
+            }
+            if (x < that.width - 1 && that.grid[y + 1][x + 1].isEmpty) {
+              valid = false;
+            }
+            if (valid) {
+              opposites.push(that.grid[y + 2][x]);
+            }
+          }
+
+          valid = true;
+
+          if (
+            that.grid[y][x + 1] &&
+            that.grid[y][x + 1].isLetter &&
+            that.grid[y][x + 2] &&
+            that.grid[y][x + 2].isEmpty
+          ) {
+            if (y > 0 && that.grid[y - 1][x + 1].isEmpty) {
+              valid = false;
+            }
+            if (y < that.height - 1 && that.grid[y + 1][x + 1].isEmpty) {
+              valid = false;
+            }
+            if (valid) {
+              opposites.push(that.grid[y][x + 2]);
+            }
+          }
+        });
+        return opposites;
       }
 
       _canForceField(field, forcedFieldKeys, orientation) {
@@ -516,6 +598,8 @@ sap.ui.define(
             if (!forcedFieldKeys.has(above.x + "," + above.y + ",horizontal")) {
               return false;
             }
+          } else if (above && !above.isClue && this._isReservedByOther(above)) {
+            return false;
           }
 
           if (
@@ -527,6 +611,8 @@ sap.ui.define(
             if (!forcedFieldKeys.has(below.x + "," + below.y + ",horizontal")) {
               return false;
             }
+          } else if (below && !below.isClue && this._isReservedByOther(below)) {
+            return false;
           }
         } else {
           if (field.x > 0) {
@@ -540,6 +626,8 @@ sap.ui.define(
             if (!forcedFieldKeys.has(left.x + "," + left.y + ",vertical")) {
               return false;
             }
+          } else if (left && !left.isClue && this._isReservedByOther(left)) {
+            return false;
           }
 
           if (
@@ -550,6 +638,8 @@ sap.ui.define(
             if (!forcedFieldKeys.has(right.x + "," + right.y + ",vertical")) {
               return false;
             }
+          } else if (right && !right.isClue && this._isReservedByOther(right)) {
+            return false;
           }
         }
 
@@ -581,6 +671,8 @@ sap.ui.define(
 
           let reservedByOther = that._isReservedByOther(current);
 
+          // Feld ist leer und kann daher selber als Hinweisfeld dienen, es muss also kein anderes
+          // Feld markiert werden
           if (
             current.isEmpty &&
             !current.nextWordLocation &&
@@ -589,9 +681,8 @@ sap.ui.define(
             candidate = null;
             break;
           }
-          // Feld bereits durch etwas anderes als die strukturelle Ableitung
-          // selbst reserviert (z.B. einen platzierten Dummy) - hier ist nichts
-          // mehr zu klären.
+          // Feld bereits durch etwas anderes als die Struktur des Rätsels
+          //  reserviert (z.B. einen platzierten Dummy)
           if (current.isEmpty && reservedByOther) {
             candidate = null;
             break;
@@ -1079,7 +1170,10 @@ sap.ui.define(
         return this.gridEvaluation[y][x].score;
       }
 
-      getDirectionEvaluation(direction) {
+      getDirectionEvaluation(direction, clueX, clueY) {
+        // if (clueX === 0 || clueY === 0) {
+        //   return 1;
+        // }
         return this.controller
           .getView()
           .getModel("weights")
@@ -1130,71 +1224,119 @@ sap.ui.define(
           direction === "down"
         ) {
           if (y == this.height - 1) {
-            return 1;
+            // Am unteren Rand gibt es kein Feld darunter, das als "reserved"
+            // markiert werden könnte. Stattdessen direkt prüfen, ob ein
+            // Nachbarwort in gleicher Orientierung ebenfalls genau am Rand endet.
+            if (x < this.width - 1) {
+              let right = this.grid[y][x + 1];
+              if (
+                right.dummyVertical &&
+                right.dummyVertical.startY + right.dummyVertical.length - 1 == y
+              ) {
+                adjWordEndings += 1;
+              }
+            }
+            if (x > 0) {
+              let left = this.grid[y][x - 1];
+              if (
+                left.dummyVertical &&
+                left.dummyVertical.startY + left.dummyVertical.length - 1 == y
+              ) {
+                adjWordEndings += 1;
+              }
+            }
+            return 1 - adjWordEndings * parallelWordPenalty;
           }
           // Feld rechts vom aktuellen Feld
           if (x < this.width - 1) {
-            // let right = this.grid[y][x + 1];
-            // if (
-            //   right.dummyVertical &&
-            //   right.dummyVertical.startY + right.dummyVertical.length - 1 == y
-            // ) {
-            //   adjWordEndings += 1;
-            // }
-            let right = this.grid[y + 1][x + 1];
-            if (right.reserved) {
+            let right = this.grid[y][x + 1];
+            if (
+              right.dummyVertical &&
+              right.dummyVertical.startY + right.dummyVertical.length - 1 == y
+            ) {
               adjWordEndings += 1;
             }
+            // let right = this.grid[y + 1][x + 1];
+            // if (right.reserved) {
+            //   adjWordEndings += 1;
+            // }
           }
           // Feld links vom aktuellen Feld
           if (x > 0) {
-            // let left = this.grid[y][x - 1];
-            // if (
-            //   left.dummyVertical &&
-            //   left.dummyVertical.startY + left.dummyVertical.length - 1 == y
-            // ) {
-            //   adjWordEndings += 1;
-            // }
-            let left = this.grid[y + 1][x - 1];
-            if (left.reserved) {
+            let left = this.grid[y][x - 1];
+            if (
+              left.dummyVertical &&
+              left.dummyVertical.startY + left.dummyVertical.length - 1 == y
+            ) {
               adjWordEndings += 1;
             }
+            // let left = this.grid[y + 1][x - 1];
+            // if (left.reserved) {
+            //   adjWordEndings += 1;
+            // }
           }
         }
         // horizontales Wort
         else {
           if (x == this.width - 1) {
-            return 1;
+            // Am rechten Rand gibt es kein Feld daneben, das als "reserved"
+            // markiert werden könnte. Stattdessen direkt prüfen, ob ein
+            // Nachbarwort in gleicher Orientierung ebenfalls genau am Rand endet.
+            if (y < this.height - 1) {
+              let below = this.grid[y + 1][x];
+              if (
+                below.dummyHorizontal &&
+                below.dummyHorizontal.startX +
+                  below.dummyHorizontal.length -
+                  1 ==
+                  x
+              ) {
+                adjWordEndings += 1;
+              }
+            }
+            if (y > 0) {
+              let above = this.grid[y - 1][x];
+              if (
+                above.dummyHorizontal &&
+                above.dummyHorizontal.startX +
+                  above.dummyHorizontal.length -
+                  1 ==
+                  x
+              ) {
+                adjWordEndings += 1;
+              }
+            }
+            return 1 - adjWordEndings * parallelWordPenalty;
           }
           // Feld unter dem aktuellen Feld
           if (y < this.height - 1) {
-            // let below = this.grid[y + 1][x];
-            // if (
-            //   below.dummyHorizontal &&
-            //   below.dummyHorizontal.startX + below.dummyHorizontal.length - 1 ==
-            //     x
-            // ) {
-            //   adjWordEndings += 1;
-            // }
-            let below = this.grid[y + 1][x + 1];
-            if (below.reserved) {
+            let below = this.grid[y + 1][x];
+            if (
+              below.dummyHorizontal &&
+              below.dummyHorizontal.startX + below.dummyHorizontal.length - 1 ==
+                x
+            ) {
               adjWordEndings += 1;
             }
+            // let below = this.grid[y + 1][x + 1];
+            // if (below.reserved) {
+            //   adjWordEndings += 1;
+            // }
           }
           // Feld über dem aktuellen Feld
           if (y > 0) {
-            // let above = this.grid[y - 1][x];
-            // if (
-            //   above.dummyHorizontal &&
-            //   above.dummyHorizontal.startX + above.dummyHorizontal.length - 1 ==
-            //     x
-            // ) {
-            //   adjWordEndings += 1;
-            // }
             let above = this.grid[y - 1][x];
-            if (above.reserved) {
+            if (
+              above.dummyHorizontal &&
+              above.dummyHorizontal.startX + above.dummyHorizontal.length - 1 ==
+                x
+            ) {
               adjWordEndings += 1;
             }
+            // let above = this.grid[y - 1][x];
+            // if (above.reserved) {
+            //   adjWordEndings += 1;
+            // }
           }
         }
         return 1 - adjWordEndings * parallelWordPenalty;
@@ -1242,6 +1384,7 @@ sap.ui.define(
           row.forEach(function (field) {
             let edges = that._getAdjEdges(field);
             let clues = that._getAdjClues(field);
+            let blocked = that._getAdjBlocked(field);
             let letters = that._getAdjLetters(field);
             let score = 0;
 
@@ -1263,6 +1406,7 @@ sap.ui.define(
             that.gridEvaluation[field.y][field.x] = {
               edges: edges,
               clues: clues,
+              blocked: blocked,
               letters: letters,
               score: score,
             };
@@ -1283,9 +1427,9 @@ sap.ui.define(
           let topleft = this.grid[y - 1][x - 1];
           if (topleft.x != field.startX && topleft.y != field.startY) {
             if (topleft.reserved) {
-              bonus += 1;
+              bonus += 2;
             } else if (topleft.nextWordLocation) {
-              bonus += 0.5;
+              bonus += 1;
             }
           }
         }
@@ -1365,6 +1509,42 @@ sap.ui.define(
         }
 
         return clues;
+      }
+
+      _getAdjBlocked(field) {
+        let blocked = 0;
+        let x = field.x;
+        let y = field.y;
+
+        if (x > 0) {
+          let left = this.grid[y][x - 1];
+          if (left && (left.isClue || left.reserved)) {
+            blocked += 1;
+          }
+        }
+
+        if (x < this.width - 1) {
+          let right = this.grid[y][x + 1];
+          if (right && (right.isClue || right.reserved)) {
+            blocked += 1;
+          }
+        }
+
+        if (y > 0) {
+          let above = this.grid[y - 1][x];
+          if (above && (above.isClue || above.reserved)) {
+            blocked += 1;
+          }
+        }
+
+        if (y < this.height - 1) {
+          let below = this.grid[y + 1][x];
+          if (below && (below.isClue || below.reserved)) {
+            blocked += 1;
+          }
+        }
+
+        return blocked;
       }
 
       _getAdjLetters(field) {
@@ -1561,25 +1741,25 @@ sap.ui.define(
           if (dummy.horizontal) {
             field.dummyHorizontal = dummy;
             this._recomputeContentFlags(field);
-            if (
-              that.grid[y - 1] &&
-              that.grid[y - 1][x].isClue &&
-              that.grid[y + 1] &&
-              that.grid[y + 1][x].isEmpty
-            ) {
-              that._markField(that.grid[y + 1][x], dummy, { forced: true });
-            }
+            // if (
+            //   that.grid[y - 1] &&
+            //   that.grid[y - 1][x].isClue &&
+            //   that.grid[y + 1] &&
+            //   that.grid[y + 1][x].isEmpty
+            // ) {
+            //   that._markField(that.grid[y + 1][x], dummy, { forced: true });
+            // }
           } else {
             field.dummyVertical = dummy;
             this._recomputeContentFlags(field);
-            if (
-              that.grid[y][x - 1] &&
-              that.grid[y][x - 1].isClue &&
-              that.grid[y][x + 1] &&
-              that.grid[y][x + 1].isEmpty
-            ) {
-              that._markField(that.grid[y][x + 1], dummy, { forced: true });
-            }
+            // if (
+            //   that.grid[y][x - 1] &&
+            //   that.grid[y][x - 1].isClue &&
+            //   that.grid[y][x + 1] &&
+            //   that.grid[y][x + 1].isEmpty
+            // ) {
+            //   that._markField(that.grid[y][x + 1], dummy, { forced: true });
+            // }
           }
         }
       }
