@@ -1,0 +1,25 @@
+<core:FragmentDefinition
+    xmlns="sap.m"
+    xmlns:core="sap.ui.core"
+    xmlns:form="sap.ui.layout.form">
+    <Popover placement="Top">
+        <form:SimpleForm
+            id="fieldSpecs"
+            editable="false"
+            layout="ResponsiveGridLayout"
+            title="Specs">
+            <form:content>
+                <CheckBox
+                    selected="{/isEmpty}"
+                    text="Empty" />
+                <CheckBox
+                    selected="{/isClue}"
+                    text="Clue" />
+                <CheckBox
+                    selected="{/isLetter}"
+                    text="Letter" />
+
+            </form:content>
+        </form:SimpleForm>
+    </Popover>
+</core:FragmentDefinition>

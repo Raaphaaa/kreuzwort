@@ -12,44 +12,43 @@
   text-align: center !important;
 }
 
-.cellHighlighting div div span[data-isempty="false"][data-isletter="false"] {
-  background: rgba(0, 0, 0, 0.5);
+.cellHighlighting div div span[data-color="gray"] {
+  background: rgba(5, 5, 5, 0.5);
 }
-.cellHighlighting div div span[data-isempty="false"][data-isletter="true"] {
+.cellHighlighting div div span[data-color="lightgray"] {
   background: rgba(163, 163, 163, 0.5);
 }
-
-.cellHighlighting
-  div[data-shownext="true"]
-  div
-  span[data-isempty="true"][data-nextword="next"] {
+.cellHighlighting div div span[data-color="orange"] {
   background: rgb(255, 185, 87);
 }
-.cellHighlighting
-  div[data-shownext="true"]
-  div
-  span[data-isempty="true"][data-nextword="reserved"] {
+.cellHighlighting div div span[data-color="red"] {
   background: rgb(255, 77, 77);
 }
-.cellHighlighting
-  div
-  div
-  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="true"][data-hasvertical="true"] {
+.cellHighlighting div div span[data-color="lightgreen"] {
   background: rgba(94, 255, 105, 0.5);
 }
-.cellHighlighting
-  div
-  div
-  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="false"][data-hasvertical="true"] {
+.cellHighlighting div div span[data-color="lightyellow"] {
   background: rgba(252, 255, 94, 0.7);
 }
-.cellHighlighting
-  div
-  div
-  span[data-isempty="false"][data-isletter="true"][data-hashorizontal="true"][data-hasvertical="false"] {
+.cellHighlighting div div span[data-color="lightblue"] {
   background: rgba(141, 173, 255, 0.7);
 }
+.cellHighlighting div div span[data-color="blue"] {
+  background: #8ddbff;
+}
 
+.cellHighlighting div div span[data-color="focusletter"] {
+  background: #fdad52;
+}
+.cellHighlighting div div span[data-color="highlightletter"] {
+  background: #c4c3c3;
+}
+.cellHighlighting div div span[data-color="focusclue"] {
+  background: #32beff;
+}
+.cellHighlighting div div span[data-color="highlightclue"] {
+  background: #32beff;
+}
 /* ========== Richtungspfeile ========== */
 .arrows {
   position: relative;

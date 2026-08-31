@@ -37,9 +37,28 @@ sap.ui.define(
 
       reset() {
         this.dummys = [];
+        this.resetWordHighlighting();
+        this.refreshSettings();
         this.resetGrid();
         this._shapeFirstDummy();
         this.controller.setGrid(this.getGrid());
+      }
+
+      resetWordHighlighting() {
+        this.hideCurrentWord();
+      }
+
+      refreshSettings() {
+        let settings = this.controller.getView().getModel("settings");
+        this.height = settings.getProperty("/height");
+        this.width = settings.getProperty("/width");
+        this.maxLength = settings.getProperty("/maxLength");
+        if (this.height < 5) {
+          this.height = 5;
+        }
+        if (this.width < 5) {
+          this.width = 5;
+        }
       }
 
       getField(x, y) {
@@ -1641,6 +1660,8 @@ sap.ui.define(
               reserved: false,
               hasVerticalWord: false,
               hasHorizontalWord: false,
+              highlighted: false,
+              focused: false,
             };
           }
         }
@@ -1673,26 +1694,21 @@ sap.ui.define(
       }
 
       _shapeFirstDummy() {
-        let x = this.controller
-          .getView()
-          .getModel("settings")
-          .getProperty("/firstWordX");
-        let y = this.controller
-          .getView()
-          .getModel("settings")
-          .getProperty("/firstWordY");
+        let settings = this.controller.getView().getModel("settings");
+        let x = settings.getProperty("/firstWordX");
+        let y = settings.getProperty("/firstWordY");
 
-        let length = this.controller
-          .getView()
-          .getModel("settings")
-          .getProperty("/firstWordLength");
-        let direction = this.controller
-          .getView()
-          .getModel("settings")
-          .getProperty("/firstWordDirection");
+        let length = settings.getProperty("/firstWordLength");
+        let direction = settings.getProperty("/firstWordDirection");
 
-        x = x > 5 ? 5 : x;
-        y = y > 5 ? 5 : y;
+        let maxStartY = settings.getProperty("/height") - 5;
+        let maxStartX = settings.getProperty("/width") - 5;
+
+        maxStartX = maxStartX < 0 ? 0 : maxStartX;
+        maxStartY = maxStartY < 0 ? 0 : maxStartY;
+
+        x = x > maxStartX ? maxStartX : x;
+        y = y > maxStartY ? maxStartY : y;
 
         let dummy = new Dummy(x, y, this);
         dummy.shape(false, direction, length);
@@ -2078,6 +2094,29 @@ sap.ui.define(
             that._unmarkField(field, dummy);
           });
         });
+      }
+
+      highlight(x, y) {
+        this._setFocusedCell(x, y);
+
+        this.controller.setGrid(this.getGrid());
+      }
+
+      hideCurrentWord() {
+        this.highlightedWord = null;
+        this.highlightedCells = [];
+        if (this.focusedCell != null) {
+          this.grid[this.focusedCell.y][this.focusedCell.x].focused = false;
+          this.focusedCell = null;
+        }
+      }
+
+      _setFocusedCell(x, y) {
+        if (this.focusedCell != null) {
+          this.grid[this.focusedCell.y][this.focusedCell.x].focused = false;
+        }
+        this.grid[y][x].focused = true;
+        this.focusedCell = { x: x, y: y };
       }
     };
   },

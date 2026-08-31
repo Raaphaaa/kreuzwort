@@ -1,18 +1,149 @@
-<mvc:View controllerName="kreuzwort.kreuzwort.controller.KWR"
+<mvc:View
+    controllerName="kreuzwort.kreuzwort.controller.KWR"
     xmlns:mvc="sap.ui.core.mvc"
     xmlns="sap.m"
+    xmlns:form="sap.ui.layout.form"
     xmlns:core="sap.ui.core">
-    <Page id="page" title="{i18n>title}">
+    <Page
+        id="page"
+        title="{i18n>title}">
         <VBox>
-            <Button
-                text="Reset"
-                press=".reset"/>
-            <Button
-                text="Step"
-                press=".step"/>
-            <Button
-                text="Remove"
-                press=".removeLastWord"/>
+            <HBox>
+                <form:SimpleForm
+                    id="gridSettings"
+                    editable="true"
+                    layout="ResponsiveGridLayout"
+                    title="Grid Size">
+                    <form:content>
+                        <Label
+                            labelFor="widthSlider"
+                            text="Breite" />
+                        <HBox>
+                            <Slider
+                                id="widthSlider"
+                                min="{settings>/minWidth}"
+                                max="{settings>/maxWidth}"
+                                value="{settings>/width}" />
+                        </HBox>
+                        <Label
+                            labelFor="heightSlider"
+                            text="Höhe" />
+                        <HBox>
+                            <Slider
+                                id="heightSlider"
+                                min="{settings>/minHeight}"
+                                max="{settings>/maxHeight}"
+                                value="{settings>/height}" />
+                        </HBox>
+                    </form:content>
+                </form:SimpleForm>
+                <form:SimpleForm
+                    id="firstWordSettings"
+                    editable="true"
+                    layout="ResponsiveGridLayout"
+                    title="First Word">
+                    <form:content>
+                        <Label text="Coordinates" />
+                        <HBox>
+                            <Label text="X" />
+                            <Slider
+                                id="startXSlider"
+                                min="0"
+                                max="{= ${settings>/width} - 5}"
+                                value="{settings>/firstWordX}" />
+                            <Label text="Y" />
+                            <Slider
+                                id="startYSlider"
+                                min="0"
+                                max="{= ${settings>/height} - 5}"
+                                value="{settings>/firstWordY}" />
+                        </HBox>
+                        <Label text="Length" />
+                        <Slider
+                            id="startLengthSlider"
+                            min="0"
+                            max="{settings>/maxLength}"
+                            value="{settings>/firstWordLength}" />
+                    </form:content>
+                </form:SimpleForm>
+                <form:SimpleForm
+                    id="visualSettings"
+                    editable="true"
+                    layout="ResponsiveGridLayout"
+                    title="Visuals">
+                    <form:content>
+                        <HBox>
+                            <VBox>
+                                <Label
+                                    labelFor="switchLocations"
+                                    text="Show reserved Locations" />
+                                <Switch
+                                    id="switchLocations"
+                                    state="{settings>/showLocations}" />
+
+                                <Label
+                                    labelFor="switchMissingDirections"
+                                    text="Show missing directions" />
+                                <Switch
+                                    id="switchMissingDirections"
+                                    state="{settings>/showMissingDirections}" />
+                            </VBox>
+                            <VBox>
+                                <Label
+                                    labelFor="switchCoordinates"
+                                    text="Show coordinates" />
+                                <Switch
+                                    id="switchCoordinates"
+                                    state="{settings>/showCoordinates}" />
+
+                                <Label
+                                    labelFor="switchEmptyEvaluations"
+                                    text="Empty field evaluations" />
+                                <Switch
+                                    id="switchEmptyEvaluations"
+                                    state="{settings>/showEmptyEvaluations}" />
+
+                                <Label
+                                    labelFor="switchClueEvaluations"
+                                    text="Clue field evaluations" />
+                                <Switch
+                                    id="switchClueEvaluations"
+                                    state="{settings>/showClueEvaluations}" />
+
+                                <Label
+                                    labelFor="switchLetterEvaluations"
+                                    text="Letter field evaluations" />
+                                <Switch
+                                    id="switchLetterEvaluations"
+                                    state="{settings>/showLetterEvaluations}" />
+                            </VBox>
+                        </HBox>
+                    </form:content>
+                </form:SimpleForm>
+            </HBox>
+            <form:SimpleForm
+                id="generatorControls"
+                editable="true"
+                layout="ResponsiveGridLayout"
+                title="Controls">
+                <form:content>
+                    <HBox>
+                        <Button
+                            text="Reset"
+                            press=".reset" />
+                        <Button
+                            text="Step"
+                            press=".step" />
+                        <Button
+                            text="Step x10"
+                            press=".step10" />
+                        <Button
+                            text="Remove"
+                            press=".removeLastWord" />
+                    </HBox>
+                </form:content>
+            </form:SimpleForm>
+
         </VBox>
         <HBox>
             <VBox
@@ -33,43 +164,67 @@
                         <items>
                             <Text
                                 class="arrows"
-                                text="x{grid>x} y{grid>y}">
+                                core:require="{
+                                    Formatter: 'kreuzwort/kreuzwort/model/formatter'
+                                }"
+                                text="{
+                                    formatter: 'Formatter.formatText.bind($controller)',
+                                    parts: [
+                                        'grid>x',
+                                        'grid>y',
+                                        'grid>score',
+                                        'grid>isEmpty',
+                                        'grid>isClue',
+                                        'grid>isLetter',
+                                        'grid>nextWordLocation',
+
+                                        'settings>/showCoordinates',
+                                        'settings>/showLocations',
+
+                                        'settings>/showEmptyEvaluations',
+                                        'settings>/showClueEvaluations',
+                                        'settings>/showLetterEvaluations'
+                                    ]
+                                }">
                                 <customData>
                                     <core:CustomData
-                                        key="isempty"
-                                        value="{= ${grid>isEmpty}.toString()}"
-                                        writeToDom="true" />
+                                        key="x"
+                                        writeToDom="true"
+                                        value="{= ${grid>x}.toString()}" />
                                     <core:CustomData
-                                        key="isletter"
-                                        value="{= ${grid>isLetter}.toString()}"
-                                        writeToDom="true" />
-                                        
+                                        key="y"
+                                        writeToDom="true"
+                                        value="{= ${grid>y}.toString()}" />
+
                                     <core:CustomData
-                                        key="hashorizontal"
-                                        value="{= ${grid>hasHorizontalWord}.toString()}"
-                                        writeToDom="true" />
-                                    <core:CustomData
-                                        key="hasvertical"
-                                        value="{= ${grid>hasVerticalWord}.toString()}"
-                                        writeToDom="true" />
-                                    
-                                    <core:CustomData
-                                        key="nextword"
-                                        value="{= ${grid>nextWordLocation} ? ${grid>reserved} ? 'reserved' : 'next' : ''}"
-                                        writeToDom="true" />
-                                    <core:CustomData
-                                        key="shownext"
-                                        value="{= ${settings>/showLocations}.toString()}"
-                                        writeToDom="true" />
+                                        key="color"
+                                        writeToDom="true"
+                                        core:require="{
+                                            Formatter: 'kreuzwort/kreuzwort/model/formatter'
+                                        }"
+                                        value="{
+                                        formatter: 'Formatter.formatColor.bind($controller)',
+                                        parts: [
+                                            'grid>isEmpty',
+                                            'grid>isLetter',
+                                            'grid>isClue',
+
+                                            'grid>hasHorizontalWord',
+                                            'grid>hasVerticalWord',
+                                            
+                                            'grid>nextWordLocation',
+                                            'grid>reserved',
+
+                                            'grid>highlighted',
+                                            'grid>focused',
+
+                                            'settings>/showLocations',
+                                            'settings>/showMissingDirections'
+                                        ] 
+                                    }" />
                                 </customData>
                             </Text>
                         </items>
-                        <customData>
-                            <core:CustomData
-                                key="shownext"
-                                value="{= ${settings>/showLocations}.toString()}"
-                                writeToDom="true" />
-                        </customData>
                     </HBox>
                 </items>
             </VBox>
