@@ -93,7 +93,20 @@ sap.ui.define(
         return field.isForcedByOtherThan(this._structuralForceKey);
       }
 
+      // Grid ist fertig, wenn kein Feld mehr leer ist, also jedes Feld ein Hinweis-
+      // oder Buchstabenfeld ist
+      isFinished() {
+        return this.grid.every((row) => row.every((field) => !field.isEmpty));
+      }
+
       step() {
+        // Fertige Grids nicht weiter verändern (sonst können Validierung/Reshaping
+        // ein bereits volles Grid wieder aufbrechen)
+        if (this.isFinished()) {
+          console.log("GRID FINISHED");
+          return;
+        }
+
         let that = this,
           location,
           dummy,
@@ -344,12 +357,35 @@ sap.ui.define(
         });
 
         if (possible) {
+          let replacedDummys = new Set();
+          let applied = false;
           fixes.forEach(function (fix) {
+            // Mehrere unmögliche Felder können denselben Dummy ersetzen wollen (z.B. ein
+            // Hinweisfeld am linken Rand zwischen zwei unmöglichen Feldern). Nur der erste
+            // Fix wird angewendet, verbleibende unmögliche Felder werden beim nächsten
+            // Durchlauf von _validateGrid erneut erkannt.
+            if (replacedDummys.has(fix.replace)) {
+              return;
+            }
+            replacedDummys.add(fix.replace);
+
+            let index = that.dummys.indexOf(fix.replace);
             that.removeDummyFromGrid(fix.replace);
             let newDummy = new Dummy(fix.field.x, fix.field.y, that);
             newDummy.shape(false, fix.direction, fix.replace.length + 1);
+
+            if (newDummy.shaped) {
+              applied = true;
+            } else {
+              // Fix nicht möglich: ursprünglichen Dummy an seiner alten Position in der
+              // Reihenfolge wiederherstellen (relevant für _pickBacktrackTarget)
+              that.addDummyToGrid(fix.replace);
+              that.dummys.splice(that.dummys.indexOf(fix.replace), 1);
+              that.dummys.splice(index, 0, fix.replace);
+            }
           });
-          return true;
+          // Wurde kein Fix angewendet, muss der Aufrufer per Backtracking reagieren
+          return applied;
         }
         return false;
       }
@@ -992,9 +1028,9 @@ sap.ui.define(
           below = this.grid[2][x + 1];
 
           if (
-            first.reserved &&
-            ((third && third.reserved) || third == null) &&
-            below.reserved &&
+            first.isClueOrReserved &&
+            ((third && third.isClueOrReserved) || third == null) &&
+            below.isClueOrReserved &&
             second.isEmpty &&
             ((left.isClue &&
               left.clueFor &&
@@ -1013,9 +1049,9 @@ sap.ui.define(
           below = this.grid[y + 1][2];
 
           if (
-            first.isClue &&
-            ((third && third.isClue) || third == null) &&
-            below.isClue &&
+            first.isClueOrReserved &&
+            ((third && third.isClueOrReserved) || third == null) &&
+            below.isClueOrReserved &&
             second.isEmpty &&
             ((left.isClue &&
               left.clueFor &&
@@ -1501,6 +1537,11 @@ sap.ui.define(
 
         let dummy = new Dummy(x, y, this);
         dummy.shape(false, direction, length);
+        // Gewünschte Form ist nicht möglich (z.B. Richtung an dieser Position nicht
+        // erlaubt) - dann die beste verfügbare Möglichkeit nehmen
+        if (!dummy.shaped) {
+          dummy.shape();
+        }
       }
 
       getRandomInt(min, max) {

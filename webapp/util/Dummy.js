@@ -75,6 +75,24 @@ sap.ui.define([], function () {
         }
       }
 
+      // Die angeforderte Richtung/Länge ist keine gültige Möglichkeit. Der Dummy wird
+      // nicht ausgeprägt und liegt danach nicht im Grid, der Aufrufer muss reagieren
+      // (erkennbar an shaped === false bzw. Rückgabewert false).
+      if (!temp) {
+        console.log(
+          "Requested shape not possible X:" +
+            this.x +
+            " Y:" +
+            this.y +
+            " ---> Direction: " +
+            direction +
+            " Length: " +
+            length,
+        );
+        this.shaped = false;
+        return false;
+      }
+
       this.triedPossibilities.add(this._getPossibilityKey(temp));
       this.startX = this._getStartX(temp.direction);
       this.startY = this._getStartY(temp.direction);
