@@ -280,28 +280,38 @@ sap.ui.define(
         let that = this;
         let possible = true;
         let fixes = [];
+
+        // Das unmögliche Feld kann direkt am Rand liegen (z.B. in der Ecke oben rechts),
+        // daher alle Nachbarn über getField() holen, das außerhalb des Grids null liefert
+        let clueAt = function (x, y) {
+          let field = that.getField(x, y);
+          return field ? field.clueFor : null;
+        };
+        let reservedAt = function (x, y) {
+          let field = that.getField(x, y);
+          return field !== null && field.reserved;
+        };
+
         // TODO TODO TODO
         impossibleEdges.forEach(function (f) {
           // Oberer Rand
           if (f.y === 0) {
-            left = that.grid[f.y][f.x - 1].clueFor || null;
-            right = that.grid[f.y][f.x + 1].clueFor || null;
-            below = that.grid[f.y + 2][f.x].clueFor || null;
+            left = clueAt(f.x - 1, f.y);
+            right = clueAt(f.x + 1, f.y);
+            below = clueAt(f.x, f.y + 2);
 
             if (
               left &&
               left.direction === "down" &&
               left.length < that.maxLength &&
-              that.grid[f.y][f.x - 2] &&
-              that.grid[f.y][f.x - 2].reserved
+              reservedAt(f.x - 2, f.y)
             ) {
               fixes.push({ field: f, replace: left, direction: "leftdown" });
             } else if (
               right &&
               right.direction === "down" &&
               right.length < that.maxLength &&
-              that.grid[f.y][f.x + 2] &&
-              that.grid[f.y][f.x + 2].reserved
+              reservedAt(f.x + 2, f.y)
             ) {
               fixes.push({ field: f, replace: right, direction: "rightdown" });
             } else {
@@ -310,23 +320,21 @@ sap.ui.define(
           }
           // Linker Rand
           else {
-            above = that.grid[f.y - 1][f.x].clueFor || null;
-            below = that.grid[f.y + 1][f.x].clueFor || null;
-            right = that.grid[f.y][f.x + 2].clueFor || null;
+            above = clueAt(f.x, f.y - 1);
+            below = clueAt(f.x, f.y + 1);
+            right = clueAt(f.x + 2, f.y);
             if (
               above &&
               above.direction === "right" &&
               above.length < that.maxLength &&
-              that.grid[f.y - 2] &&
-              that.grid[f.y - 2][f.x].reserved
+              reservedAt(f.x, f.y - 2)
             ) {
               fixes.push({ field: f, replace: above, direction: "upright" });
             } else if (
               below &&
               below.direction === "right" &&
               below.length < that.maxLength &&
-              that.grid[f.y + 2] &&
-              that.grid[f.y + 2][f.x].reserved
+              reservedAt(f.x, f.y + 2)
             ) {
               fixes.push({ field: f, replace: below, direction: "downright" });
             } else {
@@ -373,8 +381,13 @@ sap.ui.define(
         let forcedFields = this._getForcedFields();
         let encasedFields = this._getEncasedFields();
         let oppositeForcedFields = this._getOppositeForcedFields();
+        let edgeForcedFields = this._getEdgeForcedFields();
 
-        forcedFields = forcedFields.concat(encasedFields, oppositeForcedFields);
+        forcedFields = forcedFields.concat(
+          encasedFields,
+          oppositeForcedFields,
+          edgeForcedFields,
+        );
         let forcedFieldKeys = new Set(
           forcedFields.map((field) => field.x + "," + field.y),
         );
@@ -544,6 +557,31 @@ sap.ui.define(
           }
         });
         return opposites;
+      }
+
+      _getEdgeForcedFields() {
+        // Liegt in der zweiten Spalte/Zeile ein (zukünftiges) Hinweisfeld (C), kann das
+        // leere Randfeld (#) davor kein Wort mehr bekommen: Am Rand sind keine parallel
+        // verlaufenden Wörter erlaubt und das Wort quer dazu wäre direkt durch das
+        // Hinweisfeld blockiert. Das Randfeld muss daher selbst ein Hinweisfeld werden.
+        //  _______          _____
+        // |#|C| | |        |#| | |
+        // | | | | |        |C| | |
+        //                  | | | |
+        let edgeForced = [];
+        for (let y = 0; y < this.height; y++) {
+          let edgeField = this.grid[y][0];
+          if (edgeField.isEmpty && this.grid[y][1].isClueOrReserved) {
+            edgeForced.push(edgeField);
+          }
+        }
+        for (let x = 0; x < this.width; x++) {
+          let edgeField = this.grid[0][x];
+          if (edgeField.isEmpty && this.grid[1][x].isClueOrReserved) {
+            edgeForced.push(edgeField);
+          }
+        }
+        return edgeForced;
       }
 
       _canForceField(field, forcedFieldKeys, orientation) {
@@ -1738,9 +1776,6 @@ sap.ui.define(
             }
             if (minY >= 0 && that.grid[minY][x].isEmpty) {
               that.grid[minY][x].mark(dummy, { forced: false });
-              if (x == 1 && that.grid[minY][0].isEmpty) {
-                that.grid[minY][0].mark(dummy, { forced: true });
-              }
             }
           }
           // if the word is vertical, mark the fartest field to the left of
@@ -1760,9 +1795,6 @@ sap.ui.define(
             }
             if (minX >= 0 && that.grid[y][minX].isEmpty) {
               that.grid[y][minX].mark(dummy, { forced: false });
-              if (y == 1 && that.grid[0][minX].isEmpty) {
-                that.grid[0][minX].mark(dummy, { forced: true });
-              }
             }
           }
         }
