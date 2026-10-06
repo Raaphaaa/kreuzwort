@@ -403,6 +403,28 @@ sap.ui.define([], function () {
           break;
         }
 
+        // avoids the 2x2 in the bottom right corner of the grid. No future
+        // clue fields will be placed there due to this condition
+        if (
+          (direction === "right" ||
+            direction === "downright" ||
+            direction === "upright") &&
+          y >= this.generator.height - 2 &&
+          (this.generator.width - 2 == x || this.generator.width - 3 == x)
+        ) {
+          length++;
+          continue;
+        } else if (
+          (direction === "down" ||
+            direction === "rightdown" ||
+            direction === "leftdown") &&
+          x >= this.generator.width - 2 &&
+          (this.generator.height - 2 == y || this.generator.height - 3 == y)
+        ) {
+          length++;
+          continue;
+        }
+
         // continue when the current field is empty or a letter
         if (currentField.isEmpty || currentField.isLetter) {
           // check, if the next field would be within the grid. IF so, that

@@ -5,8 +5,9 @@ sap.ui.define(
     "sap/ui/core/Fragment",
     "kreuzwort/kreuzwort/util/Dummy",
     "kreuzwort/kreuzwort/util/Generator",
+    "kreuzwort/kreuzwort/util/WordHighlighter",
   ],
-  (Controller, JSONModel, Fragment, Dummy, Generator) => {
+  (Controller, JSONModel, Fragment, Dummy, Generator, WordHighlighter) => {
     "use strict";
 
     return Controller.extend("kreuzwort.kreuzwort.controller.KWR", {
@@ -19,6 +20,7 @@ sap.ui.define(
 
       _onRouteMatched() {
         this.gridGenerator = new Generator(this);
+        this.wordHighlighter = new WordHighlighter(this);
         this.gridGenerator.init();
         this._attachPressEvent();
         this.addArrows();
@@ -26,13 +28,19 @@ sap.ui.define(
 
       reset() {
         this.resetArrows();
+        this.wordHighlighter.reset();
         this.gridGenerator.reset();
         this._attachPressEvent();
         this.addArrows();
       },
 
       setGrid(grid) {
-        this.getView().setModel(new JSONModel(grid), "grid");
+        let oModel = this.getView().getModel("grid");
+        if (!oModel) {
+          oModel = new JSONModel();
+          this.getView().setModel(oModel, "grid");
+        }
+        oModel.setData(grid);
         this._attachPressEvent();
       },
 
@@ -76,21 +84,26 @@ sap.ui.define(
           let oVBox = that.getView().byId("VBoxKWR");
           let row = oVBox.getItems()[arrow.y];
           let cell = row.getItems()[arrow.x];
-          if (cell.data("arrowdirection") != "") {
-            cell.data("arrowdirection", arrow.direction, true);
-          }
+          cell.data("arrowdirection", arrow.direction, true);
         });
       },
 
       _attachPressEvent() {
-        let rows = this.getView().byId("VBoxKWR").getItems();
+        if (!this._pressAttachedCells) {
+          this._pressAttachedCells = new WeakSet();
+        }
         let that = this;
+        let rows = this.getView().byId("VBoxKWR").getItems();
         rows.forEach(function (row) {
           let cells = row.getItems();
           cells.forEach(function (cell) {
+            if (that._pressAttachedCells.has(cell)) {
+              return;
+            }
             cell.addEventDelegate({
               onclick: that._onCellClick.bind(that),
             });
+            that._pressAttachedCells.add(cell);
           });
         });
       },
@@ -103,7 +116,7 @@ sap.ui.define(
         // let oControl = this._getGridControl(x, y);
         // let oContext = oControl.getBindingContext("grid");
 
-        this.gridGenerator.highlight(x, y);
+        this.wordHighlighter.highlight(x, y);
       },
 
       _getGridControl(x, y) {

@@ -17,23 +17,32 @@
                     <form:content>
                         <Label
                             labelFor="widthSlider"
-                            text="Breite" />
-                        <HBox>
-                            <Slider
-                                id="widthSlider"
-                                min="{settings>/minWidth}"
-                                max="{settings>/maxWidth}"
-                                value="{settings>/width}" />
-                        </HBox>
+                            text="Width" />
+                        <Slider
+                            id="widthSlider"
+                            min="{settings>/minWidth}"
+                            max="{settings>/maxWidth}"
+                            value="{settings>/width}" />
                         <Label
                             labelFor="heightSlider"
-                            text="Höhe" />
+                            text="Height" />
+                        <Slider
+                            id="heightSlider"
+                            min="{settings>/minHeight}"
+                            max="{settings>/maxHeight}"
+                            value="{settings>/height}" />
+
+                            
+                        <Label
+                            labelFor="avgWordLengthSlider"
+                            text="Avg. Word Length" />
                         <HBox>
                             <Slider
-                                id="heightSlider"
-                                min="{settings>/minHeight}"
-                                max="{settings>/maxHeight}"
-                                value="{settings>/height}" />
+                                id="avgWordLengthSlider"
+                                step="0.1"
+                                min="{settings>/minWordLength}"
+                                max="{settings>/maxWordLength}"
+                                value="{settings>/targetAverageWordLength}" />
                         </HBox>
                     </form:content>
                 </form:SimpleForm>
@@ -62,7 +71,7 @@
                         <Slider
                             id="startLengthSlider"
                             min="0"
-                            max="{settings>/maxLength}"
+                            max="{settings>/maxWordLength}"
                             value="{settings>/firstWordLength}" />
                     </form:content>
                 </form:SimpleForm>
@@ -152,6 +161,7 @@
                 width="80%"
                 items="{
                     path: 'grid>/',
+                    key: 'y',
                     templateShareable: true
                     }">
                 <items>
@@ -159,6 +169,7 @@
                         fitContainer="true"
                         items="{
                             path: 'grid>',
+                            key: 'x',
                             templateShareable: true
                             }">
                         <items>
@@ -228,6 +239,20 @@
                     </HBox>
                 </items>
             </VBox>
+            
         </HBox>
+        <form:SimpleForm
+            id="currentGridStatus"
+            editable="true"
+            layout="ResponsiveGridLayout"
+            title="Grid Status">
+            <form:content>
+                <Label text="Target Avg. Word Length" labelFor="targetWordLength" />
+                <Text id="targetWordLength" text="{settings>/targetAverageWordLength}"/>
+
+                <Label text="Current Avg. Word Length" labelFor="currentWordLength" />
+                <Text id="currentWordLength" text="{settings>/currentAverageWordLength}"/>
+            </form:content>
+        </form:SimpleForm>
     </Page>
 </mvc:View>
