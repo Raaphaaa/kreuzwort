@@ -43,6 +43,9 @@ sap.ui.define([], function () {
             return "lightgray";
           }
         } else if (isClue) {
+          if (showMissingDirections) {
+            return "gray";
+          }
           if (isFocused) {
             return "focusclue";
           } else if (isHighlighted) {

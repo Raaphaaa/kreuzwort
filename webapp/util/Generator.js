@@ -19,7 +19,7 @@ sap.ui.define(
         let settings = this.controller.getView().getModel("settings");
         this.height = settings.getProperty("/height");
         this.width = settings.getProperty("/width");
-        this.maxLength = settings.getProperty("/maxLength");
+        this.maxLength = settings.getProperty("/maxWordLength");
         if (this.height < 5) {
           this.height = 5;
         }
@@ -37,22 +37,18 @@ sap.ui.define(
 
       reset() {
         this.dummys = [];
-        this.resetWordHighlighting();
         this.refreshSettings();
         this.resetGrid();
         this._shapeFirstDummy();
+        this._getCurrentAverageWordLength();
         this.controller.setGrid(this.getGrid());
-      }
-
-      resetWordHighlighting() {
-        this.hideCurrentWord();
       }
 
       refreshSettings() {
         let settings = this.controller.getView().getModel("settings");
         this.height = settings.getProperty("/height");
         this.width = settings.getProperty("/width");
-        this.maxLength = settings.getProperty("/maxLength");
+        this.maxLength = settings.getProperty("/maxWordLength");
         if (this.height < 5) {
           this.height = 5;
         }
@@ -325,7 +321,7 @@ sap.ui.define(
           // Oberer Rand
           if (f.y === 0) {
             left = that.grid[f.y][f.x - 1].clueFor || null;
-            right = that.grid[f.y][f.x + 1].clueFor || null;
+            right = that.grid[f.y][f.x + 1]?.clueFor || null;
             below = that.grid[f.y + 2][f.x].clueFor || null;
 
             if (
@@ -351,7 +347,7 @@ sap.ui.define(
           // Linker Rand
           else {
             above = that.grid[f.y - 1][f.x].clueFor || null;
-            below = that.grid[f.y + 1][f.x].clueFor || null;
+            below = that.grid[f.y + 1][f.x]?.clueFor || null;
             right = that.grid[f.y][f.x + 2].clueFor || null;
             if (
               above &&
@@ -1207,14 +1203,6 @@ sap.ui.define(
           if (this.grid[y][x].isClue || this.grid[y][x].reserved) {
             return 1.2;
           }
-          // if (this.grid[y][x].reserved) {
-          // let averageWordLength = this.controller
-          //   .getView()
-          //   .getModel("settings")
-          //   .getProperty("/averageWordLength");
-          // let diff = Math.abs(wordLength - averageWordLength);
-          //   return 1.2 - diff * 0.1;
-          // }
         } else {
           return 1.3;
         }
@@ -1370,7 +1358,7 @@ sap.ui.define(
         let averageWordLength = this.controller
           .getView()
           .getModel("settings")
-          .getProperty("/averageWordLength");
+          .getProperty("/targetAverageWordLength");
 
         let currentWordLength = this._getCurrentAverageWordLength() || 0;
         if (currentWordLength === 0) {
@@ -1394,7 +1382,12 @@ sap.ui.define(
         for (let i = 0; i < this.dummys.length; i++) {
           totalLength += this.dummys[i].length;
         }
-        return totalLength / this.dummys.length;
+        let average = totalLength / this.dummys.length;
+        this.controller
+          .getView()
+          .getModel("settings")
+          .setProperty("/currentAverageWordLength", average);
+        return average;
       }
 
       _evaluateGrid() {
@@ -1643,6 +1636,7 @@ sap.ui.define(
         for (let y = 0; y < this.height; y++) {
           this.grid.push([]);
           let row = this.grid[y];
+          row.y = y;
           for (let x = 0; x < this.width; x++) {
             row[x] = {
               x: x,
@@ -1728,7 +1722,7 @@ sap.ui.define(
       updateGrid() {
         this._evaluateGrid();
         this.controller.setGrid(this.getGrid());
-        // this.controller.resetArrows();
+        this.controller.resetArrows();
         this.controller.addArrows();
       }
 
@@ -2094,29 +2088,6 @@ sap.ui.define(
             that._unmarkField(field, dummy);
           });
         });
-      }
-
-      highlight(x, y) {
-        this._setFocusedCell(x, y);
-
-        this.controller.setGrid(this.getGrid());
-      }
-
-      hideCurrentWord() {
-        this.highlightedWord = null;
-        this.highlightedCells = [];
-        if (this.focusedCell != null) {
-          this.grid[this.focusedCell.y][this.focusedCell.x].focused = false;
-          this.focusedCell = null;
-        }
-      }
-
-      _setFocusedCell(x, y) {
-        if (this.focusedCell != null) {
-          this.grid[this.focusedCell.y][this.focusedCell.x].focused = false;
-        }
-        this.grid[y][x].focused = true;
-        this.focusedCell = { x: x, y: y };
       }
     };
   },

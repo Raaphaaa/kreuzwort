@@ -41,7 +41,7 @@
   background: #fdad52;
 }
 .cellHighlighting div div span[data-color="highlightletter"] {
-  background: #c4c3c3;
+  background: #aeaeae;
 }
 .cellHighlighting div div span[data-color="focusclue"] {
   background: #32beff;
