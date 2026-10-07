@@ -16,6 +16,7 @@ sap.ui.define(
         // (entfernbaren) Dummy stammen, sondern aus der Grid-Struktur selbst
         // erzwungen werden (siehe _markNewForcedFields).
         this._structuralForceKey = Symbol("structuralForce");
+        this.stepCount = 0;
       }
 
       init() {
@@ -40,6 +41,7 @@ sap.ui.define(
 
       reset() {
         this.dummys = [];
+        this.stepCount = 0;
         this.refreshSettings();
         this.resetGrid();
         this._shapeFirstDummy();
@@ -91,21 +93,40 @@ sap.ui.define(
 
       // Grid ist fertig, wenn kein Feld mehr leer ist, also jedes Feld ein Hinweis-
       // oder Buchstabenfeld ist
-      isFinished() {
+      gridIsFinished() {
         return this.grid.every((row) => row.every((field) => !field.isEmpty));
       }
 
       step() {
         // Fertige Grids nicht weiter verändern (sonst können Validierung/Reshaping
         // ein bereits volles Grid wieder aufbrechen)
-        if (this.isFinished()) {
-          console.log("GRID FINISHED");
+        if (this.gridIsFinished()) {
+          this._log(
+            "FERTIG",
+            "Grid ist vollständig, keine leeren Felder mehr.",
+          );
+          return;
+        }
+
+        this.stepCount++;
+
+        // Ein Step tut genau eine Sache: entweder genau einen offenen Fehler
+        // beheben, oder - falls das Grid aktuell fehlerfrei ist - genau ein
+        // neues Wort platzieren. Nie beides, nie mehrere Fixes hintereinander
+        // in einem Aufruf (das übernimmt der jeweils nächste step()-Aufruf).
+        let fix = this._findNextFix();
+        if (fix) {
+          let detail = this._applyFix(fix);
+          this._markStructuralForcedFields();
+          this.updateGrid();
+          this._log("FIX · " + fix.type, detail);
           return;
         }
 
         let that = this,
           location,
           dummy,
+          detail,
           forcedLocations = this._getForcedDummyLocations(),
           optionalLocations = this._getOptionalDummyLocations();
         this.forcedDummys = [];
@@ -121,9 +142,10 @@ sap.ui.define(
           });
 
           if (that.forcedDummys[0].possibilities.length === 0) {
-            console.log("FORCED DUMMY HAS NO POSSIBILITIES");
-
+            let forcedField = that.forcedDummys[0];
+            let removedDescription = this._describeDummy(this.getLastDummy());
             this.getLastDummy().shape();
+            detail = `Erzwungenes Hinweisfeld (${forcedField.x},${forcedField.y}) hat keine Möglichkeiten mehr -> zuletzt platziertes Wort ${removedDescription} entfernt/umgeformt`;
           } else {
             location = forcedLocations[0];
           }
@@ -143,33 +165,155 @@ sap.ui.define(
           });
           location = optionalLocations[0];
         } else {
-          console.log("NO MARKED LOCATIONS LEFT");
-          for (let y = 0; y < that.height; y++) {
-            for (let x = 0; x < that.width; x++) {
+          // Keine markierten Positionen übrig: genau ein verbliebenes leeres
+          // Feld als optionale Position markieren. Kein rekursiver step()
+          // mehr hier - der nächste step()-Aufruf greift die neue Markierung
+          // ganz normal über _getOptionalDummyLocations() auf.
+          let marked = false;
+          for (let y = 0; y < that.height && !marked; y++) {
+            for (let x = 0; x < that.width && !marked; x++) {
               if (that.grid[y][x].isEmpty) {
                 that.grid[y][x].mark(that._structuralForceKey, {
                   forced: false,
                 });
-                this.step();
+                detail = `Keine markierten Positionen mehr -> Feld (${x},${y}) als neue optionale Position markiert`;
+                marked = true;
               }
             }
           }
+          this._markStructuralForcedFields();
+          this.updateGrid();
+          this._log("PLATZIERUNG", detail);
           return;
         }
 
         if (location != null) {
           dummy = new Dummy(location.x, location.y, that);
           dummy.shape();
+          detail = dummy.shaped
+            ? `Neues Wort bei (${location.x},${location.y}): "${dummy.direction}" Länge ${dummy.length}`
+            : `Neues Wort bei (${location.x},${location.y}) nicht formbar`;
         }
 
-        // this.updateGrid();
-
-        this._validateGrid();
         this._markStructuralForcedFields();
 
         this.updateGrid();
 
-        console.log("------------------------------------------------");
+        this._log("PLATZIERUNG", detail);
+      }
+
+      // Baut eine kurze, lesbare Beschreibung eines Dummys/Wortes für den
+      // Step-Log, z.B. "(3,2) \"right\" Länge 4".
+      _describeDummy(dummy) {
+        // dummy.shaped bleibt nach remove() (siehe Dummy.js) stehen, daher
+        // zusätzlich prüfen, ob der Dummy noch wirklich im Grid registriert ist.
+        if (!dummy || !dummy.shaped || this.dummys.indexOf(dummy) === -1) {
+          return "entfernt (keine Möglichkeiten mehr)";
+        }
+        return `(${dummy.x},${dummy.y}) "${dummy.direction}" Länge ${dummy.length}`;
+      }
+
+      // Beschreibt eine Liste betroffener Felder für den Step-Log,
+      // z.B. "(1,0), (4,2)".
+      _describeFields(fields) {
+        if (!fields || fields.length === 0) return "-";
+        return fields.map((f) => `(${f.x},${f.y})`).join(", ");
+      }
+
+      // Ein Log-Eintrag pro step()-Aufruf: Step-Nummer, Art der Aktion,
+      // was konkret passiert ist, und wie viele Felder danach noch offen sind.
+      _log(tag, detail) {
+        let empty = 0;
+        let total = this.width * this.height;
+        for (let y = 0; y < this.height; y++) {
+          for (let x = 0; x < this.width; x++) {
+            if (this.grid[y][x].isEmpty) empty++;
+          }
+        }
+        console.log(
+          `[Step ${this.stepCount}] ${tag} — ${detail}  (offen: ${empty}/${total})`,
+        );
+      }
+
+      // Ermittelt höchstens EIN aktuell offenes Problem im Grid, in der
+      // bisherigen Prioritätsreihenfolge (Constraints > Clue-Clumps > Edges >
+      // Blocked Fields). Reine Erkennung ohne Seiteneffekte - die eigentliche
+      // Korrektur übernimmt _applyFix().
+      _findNextFix() {
+        let constraints = this._getDirectionConstraints();
+        if (constraints.length > 0) {
+          return { type: "constraints", fields: constraints };
+        }
+
+        // Experimentell: Maximale Anzahl an benachbarten (auch diagonal) liegenden Hinweisfeldern
+        if (
+          this.controller
+            .getView()
+            .getModel("settings")
+            .getProperty("/adjClueLimitOn")
+        ) {
+          let clueClumps = this._validateClueClumps();
+          if (clueClumps.length > 0) {
+            return { type: "clueClumps", clumps: clueClumps };
+          }
+        }
+
+        let impossibleEdges = this._validateEdges();
+        if (impossibleEdges.length > 0) {
+          return { type: "edges", fields: impossibleEdges };
+        }
+
+        let blockedFields = this._getBlockedFields();
+        if (blockedFields.length > 0) {
+          return { type: "blocked", fields: blockedFields };
+        }
+
+        return null;
+      }
+
+      // Wendet genau die eine Korrektur an, die _findNextFix() ermittelt hat,
+      // und liefert eine lesbare Beschreibung für den Step-Log zurück.
+      _applyFix(fix) {
+        switch (fix.type) {
+          case "constraints": {
+            // Buchstabenfeld(er), die in der fehlenden Richtung keine
+            // Wortmöglichkeit mehr haben
+            let target = this._pickBacktrackTarget(fix.fields);
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            return `Buchstabenfeld ohne Wortmöglichkeit (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
+          }
+
+          case "clueClumps": {
+            let target = this._pickBacktrackTarget(fix.clumps.flat());
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            let fieldCount = fix.clumps.reduce((n, c) => n + c.length, 0);
+            return `Zu viele benachbarte Hinweisfelder (${fix.clumps.length} Cluster, ${fieldCount} Felder): Wort ${before} -> ${after}`;
+          }
+
+          case "edges": {
+            let fixDescription = this._fixEdges(fix.fields);
+            if (fixDescription) {
+              return `Unbefüllbares Randfeld (${this._describeFields(fix.fields)}) behoben: ${fixDescription}`;
+            }
+            let target = this._pickBacktrackTarget(fix.fields);
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            return `Unbefüllbares Randfeld (${this._describeFields(fix.fields)}) nicht direkt reparierbar: Wort ${before} -> ${after}`;
+          }
+
+          case "blocked": {
+            let target = this._pickBacktrackTarget();
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            return `Vollständig blockiertes Feld (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
+          }
+        }
       }
 
       // Ermittelt, welche Dummys für ein konfliktverursachendes Feld verantwortlich
@@ -225,62 +369,6 @@ sap.ui.define(
         return best || this.getLastDummy();
       }
 
-      _validateGrid() {
-        // Gesetzte Buchstabenfelder suchen, die in der verbleibenden Richtung
-        // keine Möglichkeit mehr haben, einem Wort zugeordnet zu werden.
-
-        // TODO: in getConstraints anpassen, sodass geprüft wird, ob ein Feld von horizontal & vertikal
-        // als einzige Möglichkeit geforced wird. Dann Logik überlegen, wie man das Ganze auflösen kann.
-        let constraints = this._getDirectionConstraints();
-        if (constraints.length > 0) {
-          console.log("Impossible to fill:", constraints);
-          // Dummy hat keine Möglichkeiten mehr für neue Formen offen
-          if (this._pickBacktrackTarget(constraints).shape()) {
-            console.log("Backtrack target has no possibilities left");
-          }
-          this._validateGrid();
-        } else {
-          // console.log("OK letters");
-        }
-
-        // Experimentell: Maximale Anzahl an benachbarten (auch diagonal) liegenden Hinweisfeldern
-        if (
-          this.controller
-            .getView()
-            .getModel("settings")
-            .getProperty("/adjClueLimitOn")
-        ) {
-          let clueClumps = this._validateClueClumps();
-          if (clueClumps.length > 0) {
-            console.log("TOO MANY ADJACENT CLUE FIELDS FOUND: ", clueClumps);
-            this._pickBacktrackTarget(clueClumps.flat()).shape();
-            this._validateGrid();
-          } else {
-            // console.log("OK clues");
-          }
-        }
-
-        let impossibleEdges = this._validateEdges();
-        if (impossibleEdges.length > 0) {
-          console.log("IMPOSSIBLE EDGES FOUND: ", impossibleEdges);
-          // 1.Versuch: Konstellation fixen
-          if (!this._fixEdges(impossibleEdges)) {
-            // 2. Versuch: den Dummy, der die Konstellation verursacht neu generieren
-            this._pickBacktrackTarget(impossibleEdges).shape();
-          }
-          this._validateGrid();
-        } else {
-          // console.log("OK edges");
-        }
-
-        let blockedFields = this._getBlockedFields();
-        if (blockedFields.length > 0) {
-          console.log("BLOCKED FIELDS FOUND: ", blockedFields);
-          this._pickBacktrackTarget().shape();
-          this._validateGrid();
-        }
-      }
-
       _fixEdges(impossibleEdges) {
         // impossibleEdges enthält die Randfeld(er), welche nicht befüllt werden können. Die Idee
         // ist, eines der angrenzenden Hinweisfelder zu entfernen, und das Wort, welches von diesem
@@ -301,7 +389,6 @@ sap.ui.define(
           return field !== null && field.reserved;
         };
 
-        // TODO TODO TODO
         impossibleEdges.forEach(function (f) {
           // Oberer Rand
           if (f.y === 0) {
@@ -354,16 +441,21 @@ sap.ui.define(
 
         if (possible) {
           let replacedDummys = new Set();
-          let applied = false;
+          let descriptions = [];
           fixes.forEach(function (fix) {
             // Mehrere unmögliche Felder können denselben Dummy ersetzen wollen (z.B. ein
             // Hinweisfeld am linken Rand zwischen zwei unmöglichen Feldern). Nur der erste
             // Fix wird angewendet, verbleibende unmögliche Felder werden beim nächsten
-            // Durchlauf von _validateGrid erneut erkannt.
+            // step()-Aufruf über _findNextFix() erneut erkannt.
             if (replacedDummys.has(fix.replace)) {
               return;
             }
             replacedDummys.add(fix.replace);
+
+            let oldX = fix.replace.x,
+              oldY = fix.replace.y,
+              oldDirection = fix.replace.direction,
+              oldLength = fix.replace.length;
 
             let index = that.dummys.indexOf(fix.replace);
             that.removeDummyFromGrid(fix.replace);
@@ -371,7 +463,9 @@ sap.ui.define(
             newDummy.shape(false, fix.direction, fix.replace.length + 1);
 
             if (newDummy.shaped) {
-              applied = true;
+              descriptions.push(
+                `Wort (${oldX},${oldY}) "${oldDirection}" Länge ${oldLength} ersetzt durch (${newDummy.x},${newDummy.y}) "${newDummy.direction}" Länge ${newDummy.length}`,
+              );
             } else {
               // Fix nicht möglich: ursprünglichen Dummy an seiner alten Position in der
               // Reihenfolge wiederherstellen (relevant für _pickBacktrackTarget)
@@ -381,7 +475,7 @@ sap.ui.define(
             }
           });
           // Wurde kein Fix angewendet, muss der Aufrufer per Backtracking reagieren
-          return applied;
+          return descriptions.length > 0 ? descriptions.join("; ") : false;
         }
         return false;
       }
@@ -439,10 +533,6 @@ sap.ui.define(
         forcedFields.forEach(function (field) {
           field.mark(that._structuralForceKey, { forced: true });
         });
-
-        if (forcedFields.length > 0) {
-          console.log("Updated fields to FORCED", forcedFields);
-        }
       }
 
       _getForcedFields() {
@@ -1563,7 +1653,6 @@ sap.ui.define(
         this._markOptionalWordLocations(dummy);
         this._evaluateGrid();
         this._markStructuralForcedFields();
-        // console.log("Added ", dummy);
       }
 
       _addDummyLetters(dummy) {
@@ -1843,7 +1932,6 @@ sap.ui.define(
         }
         this._evaluateGrid();
         this._markStructuralForcedFields();
-        console.log("Removed ", dummy);
       }
 
       _removeDummyLetters(dummy) {

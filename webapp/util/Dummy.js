@@ -79,16 +79,6 @@ sap.ui.define([], function () {
       // nicht ausgeprägt und liegt danach nicht im Grid, der Aufrufer muss reagieren
       // (erkennbar an shaped === false bzw. Rückgabewert false).
       if (!temp) {
-        console.log(
-          "Requested shape not possible X:" +
-            this.x +
-            " Y:" +
-            this.y +
-            " ---> Direction: " +
-            direction +
-            " Length: " +
-            length,
-        );
         this.shaped = false;
         return false;
       }
@@ -100,29 +90,6 @@ sap.ui.define([], function () {
       this.direction = temp.direction;
       this.length = temp.length;
 
-      if (this.shaped) {
-        console.log(
-          "Reshaped X:" +
-            this.x +
-            " Y:" +
-            this.y +
-            " ---> Direction: " +
-            this.direction +
-            " Length: " +
-            this.length,
-        );
-      } else {
-        console.log(
-          "Shaped X:" +
-            this.x +
-            " Y:" +
-            this.y +
-            " - Direction: " +
-            this.direction +
-            " Length: " +
-            this.length,
-        );
-      }
       this.shaped = true;
       this.generator.addDummyToGrid(this);
     }
@@ -151,7 +118,6 @@ sap.ui.define([], function () {
       });
 
       if (this.possibilities.length == 0) {
-        console.log("No possibilities for ", this);
         return;
       }
 
