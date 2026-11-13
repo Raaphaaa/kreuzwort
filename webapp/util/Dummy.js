@@ -21,27 +21,17 @@ sap.ui.define([], function () {
       this.length = null;
 
       // Mögliche Platzierungen für das spätere Wort; enthält Objekte, welche Richtung
-      // und Länge der möglichen Platzierung angeben
+      // und Länge der möglichen Platzierung angeben. Welche davon schon
+      // ausprobiert wurden, verwaltet der Entscheidungsstapel im Generator.
       this.possibilities = [];
-      this.triedPossibilities = new Set();
       this._refreshPossibilities();
     }
 
-    remove() {
-      let field = this.generator.getField(this.x, this.y);
-      this.generator.removeDummyFromGrid(this);
-      field.forcedBy.forEach(function (dummy) {
-        // forcedBy kann auch Nicht-Dummy-Owner enthalten (z.B. den
-        // structuralForceKey des Generators für grid-strukturell erzwungene
-        // Felder, siehe Generator._markNewForcedFields) - die haben kein
-        // shape() und werden hier übersprungen.
-        if (dummy instanceof Dummy) {
-          dummy.shape();
-        }
-      });
-    }
-
-    shape(random = false, direction = null, length = null) {
+    // Prägt den Dummy mit der angegebenen Richtung/Länge aus und setzt ihn
+    // ins Grid. Ist das keine gültige Möglichkeit, wird der Dummy nicht
+    // ausgeprägt und liegt danach nicht im Grid, der Aufrufer muss reagieren
+    // (erkennbar an shaped === false bzw. Rückgabewert false).
+    shape(direction, length) {
       // Dummy entfernen, damit die eigenen Buchstaben und dadurch gesetzten Hinweisfelder
       // nicht die Berechnung der möglichen Wortlängen/Richtungen beeinflussen
       if (this.shaped) {
@@ -49,55 +39,23 @@ sap.ui.define([], function () {
       }
 
       this._refreshPossibilities();
-      // Takes the best possibility and sets length/direction accordingly
-      if (this.possibilities.length == 0) {
-        this.remove();
-        return true;
-      }
-
-      let temp, i;
-      if (random) {
-        i = this.generator.getRandomInt(0, this.possibilities.length - 1);
-        temp = this.possibilities[i];
-      } else {
-        if (direction && length) {
-          for (i = 0; i < this.possibilities.length; i++) {
-            if (
-              this.possibilities[i].direction === direction &&
-              this.possibilities[i].length === length
-            ) {
-              temp = this.possibilities[i];
-              break;
-            }
-          }
-        } else {
-          temp = this.possibilities[0];
-        }
-      }
-
-      // Die angeforderte Richtung/Länge ist keine gültige Möglichkeit. Der Dummy wird
-      // nicht ausgeprägt und liegt danach nicht im Grid, der Aufrufer muss reagieren
-      // (erkennbar an shaped === false bzw. Rückgabewert false).
-      if (!temp) {
+      let valid = this.possibilities.some(
+        (p) => p.direction === direction && p.length === length,
+      );
+      if (!valid) {
         this.shaped = false;
         return false;
       }
 
-      this.triedPossibilities.add(this._getPossibilityKey(temp));
-      this.startX = this._getStartX(temp.direction);
-      this.startY = this._getStartY(temp.direction);
-      this.horizontal = this._getHorizontal(temp.direction);
-      this.direction = temp.direction;
-      this.length = temp.length;
-
-      this.shaped = true;
-      this.generator.addDummyToGrid(this);
+      this.restoreShape(direction, length);
+      return true;
     }
 
-    // Setzt eine Form direkt, ohne Prüfung gegen triedPossibilities. Nur für
-    // Fälle, in denen die Form bereits anderweitig als gültig bekannt ist
-    // (Rollback auf die vorherige Form, oder eine vorab über
-    // _getValidLengths() geprüfte Länge) - nicht für normale Platzierung.
+    // Setzt eine Form direkt, ohne sie erneut zu prüfen. Nur für Fälle, in
+    // denen die Form bereits als gültig bekannt ist (Kandidat einer
+    // Entscheidungsebene im exakt gleichen Zustand, Rollback auf die
+    // vorherige Form, oder eine vorab über _getValidLengths() geprüfte
+    // Länge).
     restoreShape(direction, length) {
       this.startX = this._getStartX(direction);
       this.startY = this._getStartY(direction);
@@ -123,12 +81,6 @@ sap.ui.define([], function () {
             score: 0,
           });
         });
-      });
-
-      this.possibilities = this.possibilities.filter(function (possibility) {
-        return !that.triedPossibilities.has(
-          that._getPossibilityKey(possibility),
-        );
       });
 
       if (this.possibilities.length == 0) {
@@ -261,10 +213,6 @@ sap.ui.define([], function () {
       return positions.some((field) =>
         this.generator.isClueForbidden(field.x, field.y),
       );
-    }
-
-    _getPossibilityKey(possibility) {
-      return possibility.direction + ":" + possibility.length;
     }
 
     _getValidDirections() {

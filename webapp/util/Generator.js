@@ -3,8 +3,9 @@ sap.ui.define(
     "sap/ui/model/json/JSONModel",
     "kreuzwort/kreuzwort/util/Dummy",
     "kreuzwort/kreuzwort/util/Field",
+    "kreuzwort/kreuzwort/util/Random",
   ],
-  function (JSONModel, Dummy, Field) {
+  function (JSONModel, Dummy, Field, Random) {
     "use strict";
 
     return class Generator {
@@ -17,6 +18,15 @@ sap.ui.define(
         // erzwungen werden (siehe _markNewForcedFields).
         this._structuralForceKey = Symbol("structuralForce");
         this.stepCount = 0;
+        // Entscheidungsstapel für die Suche (siehe step())
+        this.stack = [];
+        // Leere Felder, die im aktuellen Zweig kein Hinweisfeld werden dürfen
+        this.excluded = new Set();
+        // true, wenn alle Möglichkeiten durchsucht sind
+        this.exhausted = false;
+        // Neustarts: Nummer des aktuellen Versuchs und Steps darin
+        this.attempt = 0;
+        this.attemptSteps = 0;
       }
 
       init() {
@@ -40,13 +50,79 @@ sap.ui.define(
       }
 
       reset() {
-        this.dummys = [];
         this.stepCount = 0;
+        this.attempt = 0;
         this.refreshSettings();
-        this.resetGrid();
-        this._shapeFirstDummy();
-        this._getCurrentAverageWordLength();
+        this._initRandom();
+        let detail = this._startAttempt();
         this.controller.setGrid(this.getGrid());
+        this._log(
+          "START",
+          `Grid ${this.width}x${this.height}, Seed ${this.random.seed}, ${detail}`,
+        );
+      }
+
+      // Beginnt einen neuen Versuch mit leerem Grid und setzt das Anfangswort.
+      // Der Zufallsgenerator läuft dabei weiter (wird nicht neu geseedet),
+      // damit der komplette Lauf inklusive aller Neustarts über den Seed aus
+      // /currentSeed reproduzierbar bleibt.
+      _startAttempt() {
+        this.dummys = [];
+        this.stack = [];
+        this.excluded = new Set();
+        this.exhausted = false;
+        this.attempt++;
+        this.attemptSteps = 0;
+        // Nachbearbeitung (siehe _optimizeStep)
+        this.optimization = {
+          done: false,
+          attempts: new Map(),
+          start: null,
+          improvements: 0,
+        };
+        this.resetGrid();
+
+        let frame = this._createFirstFrame();
+        let detail;
+        if (frame.candidates.length > 0) {
+          this.stack.push(frame);
+          detail = this._applyCandidate(frame);
+        } else {
+          this.exhausted = true;
+          detail = "kein Anfangswort möglich";
+        }
+        this._publishAverageWordLength();
+        return detail;
+      }
+
+      // Maximale Anzahl Steps für den aktuellen Versuch: abhängig von der
+      // Gridgröße (größere Grids brauchen mehr Entscheidungen) und wachsend
+      // mit jedem Neustart, damit auch Grids, die mehr Suche brauchen, eine
+      // Chance bekommen. 0 = keine Neustarts.
+      _restartLimit() {
+        if (!this.restartStepsPerField) {
+          return Infinity;
+        }
+        return Math.round(
+          this.restartStepsPerField *
+            this.width *
+            this.height *
+            Math.pow(this.restartGrowth, this.attempt - 1),
+        );
+      }
+
+      // Zufallsgenerator für diesen Durchlauf. Ist in den Settings ein Seed
+      // gesetzt, wird er verwendet (reproduzierbares Rätsel), sonst wird ein
+      // neuer erzeugt. Der tatsächlich verwendete Seed steht danach in
+      // /currentSeed, damit ein Rätsel später gezielt nachgebaut werden kann.
+      _initRandom() {
+        let settings = this.controller.getView().getModel("settings");
+        let seed = settings.getProperty("/seed");
+        if (seed === null || seed === undefined || seed === "") {
+          seed = Random.createSeed();
+        }
+        this.random = new Random(seed);
+        settings.setProperty("/currentSeed", this.random.seed);
       }
 
       refreshSettings() {
@@ -60,6 +136,35 @@ sap.ui.define(
         if (this.width < 5) {
           this.width = 5;
         }
+        // Zufall (siehe _shuffleTop) und Neustarts (siehe _restartLimit)
+        this.randomTop = settings.getProperty("/randomTopCandidates");
+        this.randomMinScoreRatio = settings.getProperty("/randomMinScoreRatio");
+        this.restartStepsPerField = settings.getProperty(
+          "/restartStepsPerField",
+        );
+        this.restartGrowth = settings.getProperty("/restartGrowth");
+        // Nachbearbeitung (siehe _optimizeStep) mit Zielwerten aus den
+        // Beispielrätseln
+        this.optimizeLayout = settings.getProperty("/optimizeLayout");
+        this.optimizeAttemptsPerTarget = settings.getProperty(
+          "/optimizeAttemptsPerTarget",
+        );
+        this.targetShareTwoLetterWords = settings.getProperty(
+          "/targetShareTwoLetterWords",
+        );
+        this.targetShareShortWords = settings.getProperty(
+          "/targetShareShortWords",
+        );
+        this.targetClusterShare = settings.getProperty("/targetClusterShare");
+        this.toleranceTwoLetterWords = settings.getProperty(
+          "/toleranceTwoLetterWords",
+        );
+        this.toleranceShortWords = settings.getProperty("/toleranceShortWords");
+        this.toleranceClusterShare = settings.getProperty(
+          "/toleranceClusterShare",
+        );
+        this.maxClusterBlockSize = settings.getProperty("/maxClusterBlockSize");
+        this.optimizeRefillSteps = settings.getProperty("/optimizeRefillSteps");
       }
 
       // Liefert null für Koordinaten außerhalb des Grids
@@ -109,173 +214,133 @@ sap.ui.define(
         );
       }
 
+      // Ein Step tut genau eine Sache:
+      // - Konflikt im Grid (Sackgasse): mit einem kleinen Umbau reparieren
+      //   (REPARATUR) oder zur jüngsten Entscheidung zurückgehen, die noch
+      //   einen unversuchten Kandidaten hat, und diesen anwenden (BACKTRACK)
+      // - sonst: neue Entscheidungsebene anlegen und ihren ersten Kandidaten
+      //   anwenden (ENTSCHEIDUNG)
+      // Jede Ebene hat endlich viele Kandidaten und jede Entscheidung füllt
+      // ein leeres Feld (als Hinweisfeld oder als ausgeschlossene Position).
+      // Die Suche endet daher immer: mit einem fertigen Grid oder, wenn alle
+      // Möglichkeiten durchprobiert sind, ohne Lösung.
+      // Braucht ein Versuch zu lange (frühe Fehlentscheidung, unter der sehr
+      // viele Kombinationen liegen), wird mit leerem Grid und anderer
+      // zufälliger Reihenfolge neu begonnen (NEUSTART).
+      // Ist das Grid fertig, wird es nachträglich an die Kennzahlen der
+      // Beispielrätsel angenähert (OPTIMIERUNG, siehe _optimizeStep).
       step() {
-        // Fertige Grids nicht weiter verändern (sonst können Validierung/Reshaping
-        // ein bereits volles Grid wieder aufbrechen)
         if (this.gridIsFinished()) {
+          if (this.optimizeLayout && !this.optimization.done) {
+            this.stepCount++;
+            let detail = this._optimizeStep();
+            this.updateGrid();
+            this._log("OPTIMIERUNG", detail);
+            return;
+          }
           this._log(
             "FERTIG",
             "Grid ist vollständig, keine leeren Felder mehr.",
           );
           return;
         }
+        if (this.exhausted) {
+          this._log(
+            "KEINE LÖSUNG",
+            "Alle Möglichkeiten wurden durchsucht. Bitte neu starten.",
+          );
+          return;
+        }
 
         this.stepCount++;
 
-        // Ein Step tut genau eine Sache: entweder genau einen offenen Fehler
-        // beheben, oder - falls das Grid aktuell fehlerfrei ist - genau ein
-        // neues Wort platzieren. Nie beides, nie mehrere Fixes hintereinander
-        // in einem Aufruf (das übernimmt der jeweils nächste step()-Aufruf).
-        let fix = this._findNextFix();
-        if (fix) {
-          let detail = this._applyFix(fix);
-          this._markStructuralForcedFields();
+        if (this.attemptSteps >= this._restartLimit()) {
+          let steps = this.attemptSteps;
+          let detail = this._startAttempt();
           this.updateGrid();
-          this._log("FIX · " + fix.type, detail);
+          this._log(
+            `NEUSTART · Versuch ${this.attempt}`,
+            `kein Ergebnis nach ${steps} Steps, nächstes Limit ${this._restartLimit()} Steps, ${detail}`,
+          );
           return;
         }
+        this.attemptSteps++;
 
-        let that = this,
-          location,
-          dummy,
-          detail,
-          forcedLocations = this._getForcedDummyLocations(),
-          optionalLocations = this._getOptionalDummyLocations();
-        this.forcedDummys = [];
-
-        // Forcierte Hinweisfelder haben Vorrang
-        if (forcedLocations.length > 0) {
-          forcedLocations.forEach(function (field) {
-            that.forcedDummys.push(new Dummy(field.x, field.y, that));
-          });
-
-          that.forcedDummys.sort(function (a, b) {
-            return a.possibilities.length - b.possibilities.length;
-          });
-
-          if (that.forcedDummys[0].possibilities.length === 0) {
-            let forcedField = that.forcedDummys[0];
-            let removedDescription = this._describeDummy(this.getLastDummy());
-            this.getLastDummy().shape();
-            detail = `Erzwungenes Hinweisfeld (${forcedField.x},${forcedField.y}) hat keine Möglichkeiten mehr -> zuletzt platziertes Wort ${removedDescription} entfernt/umgeformt`;
-          } else {
-            location = forcedLocations[0];
-          }
-        }
-
-        // Optionale Felder
-        else if (optionalLocations.length > 0) {
-          // Sortieren nach Anzahl angrenzender Hinweisfelder
-
-          optionalLocations.sort(function (a, b) {
-            let adjClueDiff = that._getAdjClues(a) - that._getAdjClues(b);
-            if (adjClueDiff !== 0) {
-              return adjClueDiff;
-            }
-
-            return b.score - a.score;
-          });
-          location = optionalLocations[0];
-        } else {
-          // Keine markierten Positionen übrig: genau ein verbliebenes leeres
-          // Feld als optionale Position markieren. Kein rekursiver step()
-          // mehr hier - der nächste step()-Aufruf greift die neue Markierung
-          // ganz normal über _getOptionalDummyLocations() auf.
-          let marked = false;
-          let emptyForbidden = [];
-          for (let y = 0; y < that.height && !marked; y++) {
-            for (let x = 0; x < that.width && !marked; x++) {
-              if (!that.grid[y][x].isEmpty) {
-                continue;
-              }
-              if (that.isClueForbidden(x, y)) {
-                emptyForbidden.push(that.grid[y][x]);
-                continue;
-              }
-              that.grid[y][x].mark(that._structuralForceKey, {
-                forced: false,
-              });
-              detail = `Keine markierten Positionen mehr -> Feld (${x},${y}) als neue optionale Position markiert`;
-              marked = true;
-            }
-          }
-          // Nur noch leere Felder in der 2x2-Ecke unten rechts: dort darf kein
-          // Hinweisfeld entstehen, sie müssen also über Wörter von außerhalb
-          // befüllt werden. Das verantwortliche Wort neu formen.
-          if (!marked && emptyForbidden.length > 0) {
-            let target = this._pickBacktrackTarget(emptyForbidden);
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            detail = `Nur noch leere Felder in der Ecke unten rechts (${this._describeFields(emptyForbidden)}), dort kein Hinweisfeld möglich: Wort ${before} -> ${after}`;
-          }
-          this._markStructuralForcedFields();
-          this.updateGrid();
-          this._log("PLATZIERUNG", detail);
-          return;
-        }
-
-        if (location != null) {
-          dummy = new Dummy(location.x, location.y, that);
-          dummy.shape();
-          detail = dummy.shaped
-            ? `Neues Wort bei (${location.x},${location.y}): "${dummy.direction}" Länge ${dummy.length}`
-            : `Neues Wort bei (${location.x},${location.y}) nicht formbar`;
-        }
-
-        this._markStructuralForcedFields();
-
+        let result = this._searchStep();
         this.updateGrid();
-
-        this._log("PLATZIERUNG", detail);
+        this._log(result.tag, result.detail);
       }
 
-      // Baut eine kurze, lesbare Beschreibung eines Dummys/Wortes für den
-      // Step-Log, z.B. "(3,2) \"right\" Länge 4".
-      _describeDummy(dummy) {
-        // dummy.shaped bleibt nach remove() (siehe Dummy.js) stehen, daher
-        // zusätzlich prüfen, ob der Dummy noch wirklich im Grid registriert ist.
-        if (!dummy || !dummy.shaped || this.dummys.indexOf(dummy) === -1) {
-          return "entfernt (keine Möglichkeiten mehr)";
+      // true, wenn der Generator nichts mehr zu tun hat: Grid fertig und
+      // nachbearbeitet, oder keine Lösung
+      isDone() {
+        if (this.exhausted) {
+          return true;
         }
-        return `(${dummy.x},${dummy.y}) "${dummy.direction}" Länge ${dummy.length}`;
-      }
-
-      // Beschreibt eine Liste betroffener Felder für den Step-Log,
-      // z.B. "(1,0), (4,2)".
-      _describeFields(fields) {
-        if (!fields || fields.length === 0) return "-";
-        return fields.map((f) => `(${f.x},${f.y})`).join(", ");
-      }
-
-      // Ein Log-Eintrag pro step()-Aufruf: Step-Nummer, Art der Aktion,
-      // was konkret passiert ist, und wie viele Felder danach noch offen sind.
-      _log(tag, detail) {
-        let empty = 0;
-        let total = this.width * this.height;
-        for (let y = 0; y < this.height; y++) {
-          for (let x = 0; x < this.width; x++) {
-            if (this.grid[y][x].isEmpty) empty++;
-          }
-        }
-        console.log(
-          `[Step ${this.stepCount}] ${tag} — ${detail}  (offen: ${empty}/${total})`,
+        return (
+          this.gridIsFinished() &&
+          (!this.optimizeLayout || this.optimization.done)
         );
       }
 
-      // Ermittelt höchstens EIN aktuell offenes Problem im Grid, in der
-      // bisherigen Prioritätsreihenfolge (Constraints > Clue-Clumps > Edges >
-      // Blocked Fields). Reine Erkennung ohne Seiteneffekte - die eigentliche
-      // Korrektur übernimmt _applyFix().
-      _findNextFix() {
+      // Ein Schritt der Suche (Reparatur, Backtrack oder Entscheidung) ohne
+      // UI-Aktualisierung. Liefert Art und Beschreibung für den Log.
+      _searchStep() {
+        let conflict = this._findConflict();
+        let frame = null;
+        if (!conflict) {
+          frame = this._createFrame();
+          if (!frame) {
+            conflict = { type: "noPosition", fields: this._getEmptyFields() };
+          } else if (frame.candidates.length === 0) {
+            conflict = { type: "deadField", fields: [frame.field] };
+          }
+        }
+
+        if (conflict) {
+          let reason = this._describeConflict(conflict);
+
+          // Lässt sich der Konflikt mit einem kleinen Umbau lösen, wird das
+          // zuerst versucht (siehe _createRepairFrame)
+          let repair = this._createRepairFrame(conflict);
+          if (repair) {
+            this.stack.push(repair);
+            let detail = this._applyFirstWorking(repair);
+            if (detail) {
+              return {
+                tag: `REPARATUR #${this.stack.length} · ${conflict.type}`,
+                detail: `${reason} -> ${detail}`,
+              };
+            }
+            this.stack.pop();
+          }
+
+          let detail = this._backtrack();
+          return {
+            tag: "BACKTRACK · " + conflict.type,
+            detail: `${reason} -> ${detail}`,
+          };
+        }
+
+        this.stack.push(frame);
+        return {
+          tag: `ENTSCHEIDUNG #${this.stack.length}`,
+          detail: this._applyCandidate(frame),
+        };
+      }
+
+      // Ermittelt höchstens EINEN Konflikt, also einen Zustand, aus dem kein
+      // fertiges Grid mehr werden kann (Reihenfolge: Constraints > Ecke >
+      // Clue-Clumps > Ränder > blockierte Felder > ausgeschlossene Felder).
+      // Reine Erkennung ohne Seiteneffekte.
+      _findConflict() {
         let constraints = this._getDirectionConstraints();
         if (constraints.length > 0) {
           return { type: "constraints", fields: constraints };
         }
 
         // Pflicht-Hinweisfeld in der 2x2-Ecke unten rechts: kann nie erfüllt
-        // werden, daher muss die Ursache (das Wort, das die Markierung
-        // erzwingt) neu geformt werden.
+        // werden
         let forbiddenForced = this._getForbiddenForcedFields();
         if (forbiddenForced.length > 0) {
           return { type: "cornerClue", fields: forbiddenForced };
@@ -304,84 +369,427 @@ sap.ui.define(
           return { type: "blocked", fields: blockedFields };
         }
 
-        // Pflicht-Hinweisfeld, auf dem kein Wort mehr möglich ist. Steht
-        // bewusst am Ende: wurde bisher erst in der Platzierungsphase
-        // behandelt, also nur wenn kein anderer Fix offen war.
-        let deadField = this._getDeadForcedField();
-        if (deadField) {
-          return { type: "deadField", field: deadField };
+        // Position wurde in diesem Zweig als "kein Hinweisfeld" entschieden,
+        // ist inzwischen aber Pflicht-Hinweisfeld geworden
+        let excludedForced = [...this.excluded].filter(
+          (field) => field.isEmpty && field.reserved,
+        );
+        if (excludedForced.length > 0) {
+          return { type: "excluded", fields: excludedForced };
         }
 
         return null;
       }
 
-      // Wendet genau die eine Korrektur an, die _findNextFix() ermittelt hat,
-      // und liefert eine lesbare Beschreibung für den Step-Log zurück.
-      _applyFix(fix) {
-        switch (fix.type) {
-          case "constraints": {
-            // Buchstabenfeld(er), die in der fehlenden Richtung keine
-            // Wortmöglichkeit mehr haben
-            let target = this._pickBacktrackTarget(fix.fields);
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            return `Buchstabenfeld ohne Wortmöglichkeit (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
-          }
-
-          case "deadField": {
-            let f = fix.field;
-            let moved = this._tryMoveClueToDeadField(f);
-            if (moved) {
-              return `Pflicht-Hinweisfeld (${f.x},${f.y}) ohne Möglichkeit: ${moved}`;
-            }
-            let before = this._describeDummy(this.getLastDummy());
-            this.getLastDummy().shape();
-            return `Pflicht-Hinweisfeld (${f.x},${f.y}) ohne Möglichkeit, Verschieben nicht möglich: zuletzt platziertes Wort ${before} entfernt/umgeformt`;
-          }
-
-          case "cornerClue": {
-            let target = this._pickBacktrackTarget(fix.fields);
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            return `Pflicht-Hinweisfeld in der Ecke unten rechts (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
-          }
-
+      _describeConflict(conflict) {
+        let fields = this._describeFields(conflict.fields);
+        switch (conflict.type) {
+          case "constraints":
+            return `Buchstabenfeld ohne Wortmöglichkeit (${fields})`;
+          case "cornerClue":
+            return `Pflicht-Hinweisfeld in der Ecke unten rechts (${fields})`;
           case "clueClumps": {
-            let target = this._pickBacktrackTarget(fix.clumps.flat());
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            let fieldCount = fix.clumps.reduce((n, c) => n + c.length, 0);
-            return `Zu viele benachbarte Hinweisfelder (${fix.clumps.length} Cluster, ${fieldCount} Felder): Wort ${before} -> ${after}`;
+            let fieldCount = conflict.clumps.reduce((n, c) => n + c.length, 0);
+            return `Zu viele benachbarte Hinweisfelder (${conflict.clumps.length} Cluster, ${fieldCount} Felder)`;
           }
+          case "edges":
+            return `Unbefüllbares Randfeld (${fields})`;
+          case "blocked":
+            return `Vollständig blockiertes Feld (${fields})`;
+          case "excluded":
+            return `Ausgeschlossene Position muss Hinweisfeld werden (${fields})`;
+          case "deadField":
+            return `Pflicht-Hinweisfeld ohne Möglichkeit (${fields})`;
+          case "noPosition":
+            return `Keine Position mehr, an der ein Wort möglich ist (offen: ${fields})`;
+        }
+      }
 
-          case "edges": {
-            let fixDescription = this._fixEdges(fix.fields);
-            if (fixDescription) {
-              return `Unbefüllbares Randfeld (${this._describeFields(fix.fields)}) behoben: ${fixDescription}`;
-            }
-            let target = this._pickBacktrackTarget(fix.fields);
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            return `Unbefüllbares Randfeld (${this._describeFields(fix.fields)}) nicht direkt reparierbar: Wort ${before} -> ${after}`;
-          }
+      // Entscheidungsebene (Frame):
+      //   kind:       "first" | "forced" | "optional" | "free" | "repair"
+      //   field:      Position des Hinweisfelds, um das es geht (bei
+      //               "repair" das Konfliktfeld)
+      //   snapshot:   Zustand vor der Entscheidung (für das Zurückgehen)
+      //   signature:  Kurzform dieses Zustands (siehe _stateSignature)
+      //   candidates: geordnete Liste der Möglichkeiten an dieser Position,
+      //               { direction, length } oder { exclude: true }, bei
+      //               "repair" die möglichen Umbauten
+      //   index:      aktuell angewendeter Kandidat
 
-          case "blocked": {
-            let target = this._pickBacktrackTarget();
-            let before = this._describeDummy(target);
-            target.shape();
-            let after = this._describeDummy(target);
-            return `Vollständig blockiertes Feld (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
+      // Erste Ebene: das Anfangswort startet immer links oben. Kandidaten sind
+      // alle dort möglichen Formen. Ist in den Settings eine Länge gesetzt,
+      // kommt die gewünschte Form zuerst, bei Länge 0 wird sie wie bei jeder
+      // anderen Ebene zufällig aus den besten gewählt.
+      _createFirstFrame() {
+        let settings = this.controller.getView().getModel("settings");
+        let x = settings.getProperty("/firstWordX");
+        let y = settings.getProperty("/firstWordY");
+
+        let length = settings.getProperty("/firstWordLength");
+        let direction = settings.getProperty("/firstWordDirection");
+
+        let maxStartY = settings.getProperty("/height") - 5;
+        let maxStartX = settings.getProperty("/width") - 5;
+
+        maxStartX = maxStartX < 0 ? 0 : maxStartX;
+        maxStartY = maxStartY < 0 ? 0 : maxStartY;
+
+        x = x > maxStartX ? maxStartX : x;
+        y = y > maxStartY ? maxStartY : y;
+
+        // Maximal mögliche Länge ausgehend vom Hinweisfeld (x/y) in die
+        // gegebene Richtung bis zum Rand des Grids
+        let maxFittingLength;
+        switch (direction) {
+          case "right":
+            maxFittingLength = this.width - (x + 1);
+            break;
+          case "rightdown":
+          case "leftdown":
+            maxFittingLength = this.height - y;
+            break;
+          case "down":
+            maxFittingLength = this.height - (y + 1);
+            break;
+          case "downright":
+          case "upright":
+            maxFittingLength = this.width - x;
+            break;
+        }
+        length = length > maxFittingLength ? maxFittingLength : length;
+
+        let candidates = this._getShapeCandidates(new Dummy(x, y, this));
+        if (length > 0) {
+          let wanted = candidates.findIndex(
+            (c) => c.direction === direction && c.length === length,
+          );
+          if (wanted > 0) {
+            candidates.unshift(candidates.splice(wanted, 1)[0]);
           }
         }
+        this.firstWordField = this.getField(x, y);
+        this.firstWordFixed = length > 0;
+        return this._newFrame("first", this.firstWordField, candidates);
+      }
+
+      // Nächste Ebene nach dem Anfangswort. Pflicht-Hinweisfelder haben
+      // Vorrang: von ihnen wird das mit den wenigsten Möglichkeiten genommen
+      // (scheitert am ehesten, Sackgassen fallen so früh auf). Da es zwingend
+      // Hinweisfeld werden muss, sind nur seine Formen Kandidaten - hat es
+      // keine, ist das ein Konflikt (leere Kandidatenliste).
+      // Sonst wird zufällig eine der besten Positionen genommen, an denen ein
+      // Wort möglich ist (siehe _getCandidatePositions/_pickPosition). Letzter
+      // Kandidat ist dort, die Position auszuschließen: Sie bleibt dann in
+      // diesem Zweig frei von Hinweisfeldern und wird nicht noch einmal in
+      // anderer Reihenfolge durchprobiert.
+      // Liefert null, wenn es keine Position mehr gibt.
+      _createFrame() {
+        let forced = this._getForcedDummyLocations();
+        if (forced.length > 0) {
+          let probes = forced.map((field) => new Dummy(field.x, field.y, this));
+          // stabil sortiert: bei Gleichstand bleibt die Score-Reihenfolge
+          probes.sort((a, b) => a.possibilities.length - b.possibilities.length);
+          return this._newFrame(
+            "forced",
+            this.getField(probes[0].x, probes[0].y),
+            this._getShapeCandidates(probes[0]),
+          );
+        }
+
+        let pick = this._pickPosition();
+        if (!pick) {
+          return null;
+        }
+        let candidates = this._getShapeCandidates(pick.dummy);
+        candidates.push({ exclude: true });
+        return this._newFrame(pick.kind, pick.field, candidates);
+      }
+
+      // Wählt die Position für die nächste nicht erzwungene Entscheidung: Die
+      // ersten Positionen (in der Reihenfolge von _getCandidatePositions), an
+      // denen ein Wort möglich ist, bilden die Auswahl - höchstens so viele
+      // wie randomTopCandidates und nur solche, die gleichwertig zur ersten
+      // sind (gleiche Art, gleich viele angrenzende Hinweisfelder). Daraus
+      // wird nach Feld-Score gewichtet gezogen (siehe _shuffleTop).
+      _pickPosition() {
+        let optional = new Set(this._getOptionalDummyLocations());
+        let pool = [];
+        for (const field of this._getCandidatePositions()) {
+          let dummy = new Dummy(field.x, field.y, this);
+          if (dummy.possibilities.length === 0) {
+            continue;
+          }
+          let entry = {
+            field: field,
+            dummy: dummy,
+            kind: optional.has(field) ? "optional" : "free",
+            adjClues: this._getAdjClues(field),
+          };
+          if (
+            pool.length > 0 &&
+            (entry.kind !== pool[0].kind || entry.adjClues !== pool[0].adjClues)
+          ) {
+            break;
+          }
+          pool.push(entry);
+          if (pool.length >= this.randomTop) {
+            break;
+          }
+        }
+        if (pool.length === 0) {
+          return null;
+        }
+        return this._shuffleTop(pool, (entry) => entry.field.score)[0];
+      }
+
+      _newFrame(kind, field, candidates) {
+        return {
+          kind: kind,
+          field: field,
+          snapshot: this._snapshotState(),
+          signature: this._stateSignature(),
+          candidates: candidates,
+          index: 0,
+        };
+      }
+
+      // Formen eines Dummys als Kandidaten: die besten in zufälliger,
+      // gewichteter Reihenfolge, danach alle übrigen nach Bewertung. Beim
+      // Neuaufbau in der Nachbearbeitung (preferLongWords) kommen Formen mit
+      // 2-3 Buchstaben erst ganz am Ende.
+      _getShapeCandidates(dummy) {
+        let candidates = this._shuffleTop(
+          dummy.possibilities,
+          (p) => p.score,
+        ).map((p) => ({
+          direction: p.direction,
+          length: p.length,
+        }));
+        if (this.preferLongWords) {
+          candidates = candidates
+            .filter((c) => c.length > 3)
+            .concat(candidates.filter((c) => c.length <= 3));
+        }
+        return candidates;
+      }
+
+      // Zufällige, gewichtete Reihenfolge für die besten Einträge einer nach
+      // Score absteigend sortierten Liste. In Frage kommen höchstens die
+      // ersten randomTopCandidates, und nur, wenn ihr Score mindestens
+      // randomMinScoreRatio * bester Score erreicht. Gewichtet wird mit dem
+      // Abstand zu dieser Mindestgrenze: der beste Eintrag ist am
+      // wahrscheinlichsten, ein Eintrag knapp an der Grenze kommt kaum vor.
+      // Alle übrigen Einträge folgen danach in ihrer Reihenfolge - sie
+      // bleiben für das Backtracking erhalten, werden aber nie bevorzugt.
+      _shuffleTop(items, scoreOf) {
+        if (items.length < 2 || !(this.randomTop > 1)) {
+          return items.slice();
+        }
+        let best = scoreOf(items[0]);
+        if (!(best > 0)) {
+          return items.slice();
+        }
+        let minScore = best * this.randomMinScoreRatio;
+        let poolSize = 1;
+        while (
+          poolSize < items.length &&
+          poolSize < this.randomTop &&
+          scoreOf(items[poolSize]) >= minScore
+        ) {
+          poolSize++;
+        }
+
+        let pool = items.slice(0, poolSize);
+        let ordered = [];
+        while (pool.length > 0) {
+          let weights = pool.map((item) => Math.max(0, scoreOf(item) - minScore));
+          ordered.push(pool.splice(this._weightedIndex(weights), 1)[0]);
+        }
+        return ordered.concat(items.slice(poolSize));
+      }
+
+      // Zufälliger Index, Wahrscheinlichkeit proportional zum Gewicht. Sind
+      // alle Gewichte 0, ist jeder Index gleich wahrscheinlich.
+      _weightedIndex(weights) {
+        let total = weights.reduce((sum, w) => sum + w, 0);
+        if (total <= 0) {
+          return this.random.int(0, weights.length - 1);
+        }
+        let r = this.random.next() * total;
+        for (let i = 0; i < weights.length; i++) {
+          r -= weights[i];
+          if (r < 0) {
+            return i;
+          }
+        }
+        return weights.length - 1;
+      }
+
+      // Mögliche Positionen für ein neues (nicht erzwungenes) Wort in
+      // Reihenfolge der Priorität: zuerst die markierten Positionen (wenige
+      // angrenzende Hinweisfelder, dann hoher Score), danach alle übrigen
+      // leeren Felder zeilenweise. Ausgeschlossene Positionen und die 2x2-Ecke
+      // unten rechts fallen weg.
+      _getCandidatePositions() {
+        let optional = this._getOptionalDummyLocations().filter(
+          (field) => !this.excluded.has(field),
+        );
+        optional.sort((a, b) => {
+          let adjClueDiff = this._getAdjClues(a) - this._getAdjClues(b);
+          if (adjClueDiff !== 0) {
+            return adjClueDiff;
+          }
+          return b.score - a.score;
+        });
+
+        let rest = this._getEmptyFields().filter(
+          (field) =>
+            !field.nextWordLocation &&
+            !this.excluded.has(field) &&
+            !this.isClueForbidden(field.x, field.y),
+        );
+        return optional.concat(rest);
+      }
+
+      _getEmptyFields() {
+        let fields = [];
+        this.grid.forEach((row) => {
+          row.forEach((field) => {
+            if (field.isEmpty) {
+              fields.push(field);
+            }
+          });
+        });
+        return fields;
+      }
+
+      // Wendet ab frame.index den ersten Kandidaten an, der sich anwenden
+      // lässt (Umbauten können scheitern, Wortformen nicht). Liefert dessen
+      // Beschreibung oder null - der Zustand ist dann wie im Snapshot.
+      _applyFirstWorking(frame) {
+        for (; frame.index < frame.candidates.length; frame.index++) {
+          let detail = this._applyCandidate(frame);
+          if (detail) {
+            return detail;
+          }
+          this._restoreState(frame.snapshot);
+        }
+        return null;
+      }
+
+      // Wendet den aktuellen Kandidaten einer Ebene an. Liefert eine
+      // Beschreibung, bei einem nicht möglichen Umbau null.
+      _applyCandidate(frame) {
+        let candidate = frame.candidates[frame.index];
+        let field = frame.field;
+        let where = `${this._describeFrameKind(frame)} (${field.x},${field.y})`;
+        let count = `(Kandidat ${frame.index + 1}/${frame.candidates.length})`;
+
+        if (frame.kind === "repair") {
+          let detail = this._applyRepair(candidate);
+          return detail ? `${detail} ${count}` : null;
+        }
+
+        if (candidate.exclude) {
+          this.excluded.add(field);
+          return `${where} wird kein Hinweisfeld, alle Formen gescheitert ${count}`;
+        }
+
+        new Dummy(field.x, field.y, this).restoreShape(
+          candidate.direction,
+          candidate.length,
+        );
+        this._markStructuralForcedFields();
+        return `${where}: "${candidate.direction}" Länge ${candidate.length} ${count}`;
+      }
+
+      _describeFrameKind(frame) {
+        switch (frame.kind) {
+          case "first":
+            return "Anfangswort";
+          case "forced":
+            return "Pflicht-Hinweisfeld";
+          case "optional":
+            return "Optionale Position";
+          case "free":
+            return "Freies Feld";
+          case "repair":
+            return "Reparatur";
+        }
+      }
+
+      // Geht zur jüngsten Ebene zurück, die noch einen anwendbaren Kandidaten
+      // hat: Zustand exakt wie vor dieser Ebene herstellen, dann den nächsten
+      // Kandidaten anwenden. Ebenen ohne weitere Kandidaten werden dabei
+      // verworfen. Ist der Stapel leer, gibt es keine Lösung.
+      _backtrack() {
+        let wordsBefore = this.dummys.length;
+        let lastPopped = null;
+        while (this.stack.length > 0) {
+          let frame = this.stack[this.stack.length - 1];
+          if (frame.index + 1 < frame.candidates.length) {
+            this._restoreState(frame.snapshot);
+            frame.index++;
+            let detail = this._applyFirstWorking(frame);
+            if (detail) {
+              let level = frame.kind === "repair" ? "Reparatur" : "Entscheidung";
+              let removed = wordsBefore - frame.snapshot.order.length;
+              return `zurück zu ${level} #${this.stack.length} (${removed} Wörter entfernt), ${detail}`;
+            }
+          }
+          lastPopped = this.stack.pop();
+        }
+
+        this.exhausted = true;
+        if (lastPopped) {
+          this._restoreState(lastPopped.snapshot);
+        }
+        return "alle Möglichkeiten durchsucht, KEINE LÖSUNG";
+      }
+
+      // Baut eine kurze, lesbare Beschreibung eines Dummys/Wortes für den
+      // Step-Log, z.B. "(3,2) \"right\" Länge 4".
+      _describeDummy(dummy) {
+        // dummy.shaped bleibt nach dem Entfernen stehen, daher zusätzlich
+        // prüfen, ob der Dummy noch wirklich im Grid registriert ist.
+        if (!dummy || !dummy.shaped || this.dummys.indexOf(dummy) === -1) {
+          return "entfernt (keine Möglichkeiten mehr)";
+        }
+        return `(${dummy.x},${dummy.y}) "${dummy.direction}" Länge ${dummy.length}`;
+      }
+
+      // Beschreibt eine Liste betroffener Felder für den Step-Log,
+      // z.B. "(1,0), (4,2)".
+      _describeFields(fields) {
+        if (!fields || fields.length === 0) return "-";
+        return fields.map((f) => `(${f.x},${f.y})`).join(", ");
+      }
+
+      // Ein Log-Eintrag pro step()-Aufruf: Step-Nummer, Art der Aktion,
+      // was konkret passiert ist, und wie viele Felder danach noch offen sind.
+      _log(tag, detail) {
+        // Interne Suchschritte beim Neuaufbau in der Nachbearbeitung werden
+        // nicht einzeln geloggt
+        if (this.silent) {
+          return;
+        }
+        let empty = 0;
+        let total = this.width * this.height;
+        for (let y = 0; y < this.height; y++) {
+          for (let x = 0; x < this.width; x++) {
+            if (this.grid[y][x].isEmpty) empty++;
+          }
+        }
+        console.log(
+          `[Step ${this.stepCount}] ${tag} — ${detail}  (offen: ${empty}/${total})`,
+        );
       }
 
       // Ermittelt, welche Dummys für ein konfliktverursachendes Feld verantwortlich
       // sind (Wort auf dem Feld selbst, oder - bei leeren "unmöglichen" Feldern wie
       // bei Randkonstellationen - die Wörter auf den direkten Nachbarfeldern).
+      // Aktuell nicht verwendet, vorgesehen für Backjumping (direkt zur
+      // verursachenden Entscheidung zurückspringen).
       _getResponsibleDummys(field) {
         let dummys = new Set();
         let addFromField = (f) => {
@@ -405,158 +813,554 @@ sap.ui.define(
         return dummys;
       }
 
-      // Wählt aus den für die gegebenen Konfliktfelder verantwortlichen Dummys
-      // denjenigen aus, der zeitlich zuletzt platziert wurde - das minimiert,
-      // wie viel vom bisher aufgebauten Grid durch das Reshapen verworfen wird.
-      // Kann kein verantwortlicher Dummy ermittelt werden, wird wie bisher der
-      // zuletzt platzierte Dummy insgesamt genommen.
-      _pickBacktrackTarget(fields) {
-        let that = this;
-        let candidates = new Set();
-        let best = null;
-        let bestIndex = -1;
+      // ---- Nachbearbeitung: Wortlängen und Cluster ----
+      // Ist das Grid fertig, wird es an die Kennzahlen der Beispielrätsel
+      // (50plus.de) angenähert, jeweils mit eigenem Spielraum (tolerance...):
+      // - wenige Wörter mit 2 Buchstaben (targetShareTwoLetterWords) bzw.
+      //   2-3 Buchstaben (targetShareShortWords)
+      // - Cluster: Buchstaben, die waagerecht UND senkrecht gekreuzt werden
+      //   und in einem solchen 3x3-Block liegen (targetClusterShare)
+      // - keine solchen Blöcke größer als maxClusterBlockSize
+      // Pro Step wird eine Problemstelle angegangen: Die Wörter dort werden
+      // entfernt und der Bereich mit der normalen Suche neu aufgebaut.
+      // Übernommen wird das nur, wenn das Grid wieder perfekt ist und
+      // insgesamt näher an den Zielen liegt (siehe _layoutPenalty), sonst wird
+      // exakt zurückgesetzt. Sind alle Werte im Zielbereich, ist Schluss.
+      _optimizeStep() {
+        let opt = this.optimization;
+        let quality = this._getLayoutQuality();
+        if (opt.start === null) {
+          opt.start = quality;
+        }
 
-        if (fields && fields.length > 0) {
-          fields.forEach((field) => {
-            that._getResponsibleDummys(field).forEach((d) => candidates.add(d));
-          });
+        let target = this._getOptimizationTargets(quality).find(
+          (t) =>
+            !opt.attempts.has(t.key) ||
+            opt.attempts.get(t.key).count < this.optimizeAttemptsPerTarget,
+        );
+        if (!target) {
+          opt.done = true;
+          return `beendet: ${this._describeQuality(quality)} (vorher ${this._describeQuality(opt.start)}, ${opt.improvements} Verbesserungen)`;
+        }
 
-          candidates.forEach((d) => {
-            let idx = that.dummys.indexOf(d);
-            if (idx > bestIndex) {
-              bestIndex = idx;
-              best = d;
+        let entry = opt.attempts.get(target.key) || { count: 0, cells: target.cells };
+        entry.count++;
+        opt.attempts.set(target.key, entry);
+        let radius = target.kind === "cluster" ? (entry.count >= 3 ? 1 : 0) : entry.count >= 3 ? 2 : 1;
+
+        let result = this._refillRegion(target, radius, quality);
+        if (result.improved) {
+          opt.improvements++;
+          // Ziele in der Nähe des neu aufgebauten Bereichs bekommen wieder
+          // volle Versuche, weil sich ihre Umgebung geändert hat
+          let near = (f) =>
+            f.x >= result.box.minX - 2 &&
+            f.x <= result.box.maxX + 2 &&
+            f.y >= result.box.minY - 2 &&
+            f.y <= result.box.maxY + 2;
+          opt.attempts.forEach((e, key) => {
+            if (e.cells.some(near)) {
+              opt.attempts.delete(key);
             }
           });
+          return `${target.description}: Umgebung (${result.removed} Wörter) in ${result.steps} Suchschritten neu aufgebaut -> ${this._describeQuality(this._getLayoutQuality())}`;
         }
-        return best || this.getLastDummy();
+        return `${target.description}: keine Verbesserung nach ${result.steps} Suchschritten (Versuch ${entry.count}/${this.optimizeAttemptsPerTarget}, Umgebung ${result.removed} Wörter)`;
       }
 
-      _fixEdges(impossibleEdges) {
-        // impossibleEdges enthält die Randfeld(er), welche nicht befüllt werden können. Die Idee
-        // ist, eines der angrenzenden Hinweisfelder zu entfernen, und das Wort, welches von diesem
-        // Feld ausgeht, um 1 zu verlängern und vom "unmöglichen" Feld aus zu starten.
-        let left, right, below, above;
-        let that = this;
-        let possible = true;
-        let fixes = [];
+      // Kennzahlen des aktuellen Grids für die Nachbearbeitung
+      _getLayoutQuality() {
+        let words = this.dummys.length;
+        let two = this.dummys.filter((d) => d.length === 2);
+        let three = this.dummys.filter((d) => d.length === 3);
+        let letters = 0;
+        this.grid.forEach((row) =>
+          row.forEach((f) => {
+            if (f.isLetter) letters++;
+          }),
+        );
+        let bigSize = this.maxClusterBlockSize + 1;
+        let bigBlocks = this._getCrossedBlocks(bigSize);
+        let clusterBlocks = this._getCrossedBlocks(3);
+        return {
+          words: words,
+          letters: letters,
+          two: two,
+          three: three,
+          bigSize: bigSize,
+          bigBlocks: bigBlocks,
+          bigCells: this._blockCells(bigBlocks).size,
+          clusterBlocks: clusterBlocks,
+          clusterCells: this._blockCells(clusterBlocks).size,
+        };
+      }
 
-        // Das unmögliche Feld kann direkt am Rand liegen (z.B. in der Ecke oben rechts),
-        // daher alle Nachbarn über getField() holen, das außerhalb des Grids null liefert
-        let clueAt = function (x, y) {
-          let field = that.getField(x, y);
-          return field ? field.clueFor : null;
+      // Alle k x k Blöcke, in denen jeder Buchstabe waagerecht und senkrecht
+      // gekreuzt wird. Liefert je Block die Liste seiner Felder.
+      _getCrossedBlocks(k) {
+        let crossed = (x, y) => {
+          let f = this.getField(x, y);
+          return f && f.hasHorizontalWord && f.hasVerticalWord;
+        };
+        let blocks = [];
+        for (let y = 0; y + k <= this.height; y++) {
+          for (let x = 0; x + k <= this.width; x++) {
+            let cells = [];
+            for (let j = 0; j < k; j++) {
+              for (let i = 0; i < k; i++) {
+                if (crossed(x + i, y + j)) {
+                  cells.push(this.getField(x + i, y + j));
+                }
+              }
+            }
+            if (cells.length === k * k) {
+              blocks.push(cells);
+            }
+          }
+        }
+        return blocks;
+      }
+
+      _blockCells(blocks) {
+        let cells = new Set();
+        blocks.forEach((block) => block.forEach((f) => cells.add(f)));
+        return cells;
+      }
+
+      // Obergrenzen der Zielbereiche (Zielwert + eigene Toleranz je
+      // Kennzahl). Bei den 2-Buchstaben-Wörtern ist immer mindestens eines
+      // erlaubt: In kleinen Grids mit 10-15 Wörtern wäre sonst schon ein
+      // einziges zu viel, und das ist dort oft strukturell nicht vermeidbar.
+      _maxTwoLetterWords(q) {
+        return Math.max(
+          1,
+          (this.targetShareTwoLetterWords + this.toleranceTwoLetterWords) *
+            q.words,
+        );
+      }
+
+      _maxShortWords(q) {
+        return (
+          (this.targetShareShortWords + this.toleranceShortWords) * q.words
+        );
+      }
+
+      _maxClusterCells(q) {
+        return (
+          (this.targetClusterShare + this.toleranceClusterShare) * q.letters
+        );
+      }
+
+      // Abstand zu den Zielwerten (0 = alles im Zielbereich). Blöcke größer
+      // als maxClusterBlockSize wiegen am schwersten, dann 2-Buchstaben-
+      // Wörter, dann 2-3-Buchstaben-Wörter, dann Cluster.
+      _layoutPenalty(q) {
+        return (
+          100 * q.bigCells +
+          10 * Math.max(0, q.two.length - this._maxTwoLetterWords(q)) +
+          3 *
+            Math.max(
+              0,
+              q.two.length + q.three.length - this._maxShortWords(q),
+            ) +
+          Math.max(0, q.clusterCells - this._maxClusterCells(q))
+        );
+      }
+
+      // Problemstellen, die die Nachbearbeitung angeht, in dieser
+      // Reihenfolge: zu große Blöcke, 2-Buchstaben-Wörter, 3-Buchstaben-
+      // Wörter, 3x3-Cluster - jeweils nur, solange der Wert außerhalb des
+      // Zielbereichs liegt.
+      _getOptimizationTargets(q) {
+        let targets = [];
+        let addBlocks = (blocks, size) => {
+          blocks.forEach((cells) => {
+            targets.push({
+              kind: "cluster",
+              key: `cluster${size}:${cells[0].x},${cells[0].y}`,
+              cells: cells,
+              description: `Cluster ${size}x${size} bei (${cells[0].x},${cells[0].y})`,
+            });
+          });
+        };
+        let addWords = (words, label) => {
+          words
+            .filter((word) => !this._isFixedFirstWord(word))
+            .sort((a, b) => a.y - b.y || a.x - b.x)
+            .forEach((word) => {
+              targets.push({
+                kind: "short",
+                key: this._wordKey(word),
+                cells: this._wordCells(word),
+                description: `${label} ${this._describeDummy(word)}`,
+              });
+            });
+        };
+
+        addBlocks(q.bigBlocks, q.bigSize);
+        if (q.two.length > this._maxTwoLetterWords(q)) {
+          addWords(q.two, "Wort mit 2 Buchstaben");
+        }
+        if (q.two.length + q.three.length > this._maxShortWords(q)) {
+          addWords(q.three, "Wort mit 3 Buchstaben");
+        }
+        if (q.clusterCells > this._maxClusterCells(q)) {
+          addBlocks(q.clusterBlocks, 3);
+        }
+        return targets;
+      }
+
+      _describeQuality(q) {
+        let pct = (a, b) => (b ? Math.round((100 * a) / b) : 0) + " %";
+        return (
+          `2 Buchstaben ${pct(q.two.length, q.words)}, ` +
+          `2-3 Buchstaben ${pct(q.two.length + q.three.length, q.words)}, ` +
+          `Cluster ${pct(q.clusterCells, q.letters)}, ` +
+          `Blöcke > ${q.bigSize - 1}x${q.bigSize - 1}: ${q.bigBlocks.length}`
+        );
+      }
+
+      // Hinweisfeld und Buchstabenfelder eines Wortes
+      _wordCells(word) {
+        return [this.getField(word.x, word.y)].concat(this._wordFields(word));
+      }
+
+      // Anfangswort mit in den Settings vorgegebener Form (Länge > 0). Ein
+      // zufälliges Anfangswort darf neu aufgebaut werden: Das Feld links
+      // oben kann kein Buchstabe sein und wird daher immer wieder
+      // Hinweisfeld.
+      _isFixedFirstWord(word) {
+        return (
+          this.firstWordFixed &&
+          word.x === this.firstWordField.x &&
+          word.y === this.firstWordField.y
+        );
+      }
+
+      _wordKey(word) {
+        return `${word.x},${word.y},${word.direction},${word.length}`;
+      }
+
+      // Entfernt alle Wörter, deren Hinweisfeld oder Buchstaben im Rechteck
+      // um die Felder des Ziels (erweitert um `radius`) liegen, und baut den
+      // Bereich mit höchstens optimizeRefillSteps Suchschritten neu auf.
+      // Bei kurzen Wörtern werden dabei lange Formen zuerst probiert.
+      _refillRegion(target, radius, qualityBefore) {
+        let snapshot = this._snapshotState();
+        let savedStack = this.stack;
+        let penaltyBefore = this._layoutPenalty(qualityBefore);
+
+        let minX = Math.min(...target.cells.map((f) => f.x)) - radius;
+        let maxX = Math.max(...target.cells.map((f) => f.x)) + radius;
+        let minY = Math.min(...target.cells.map((f) => f.y)) - radius;
+        let maxY = Math.max(...target.cells.map((f) => f.y)) + radius;
+        let inRegion = (f) =>
+          f.x >= minX && f.x <= maxX && f.y >= minY && f.y <= maxY;
+        let region = this.dummys.filter(
+          (d) => !this._isFixedFirstWord(d) && this._wordCells(d).some(inRegion),
+        );
+
+        region.forEach((d) => this.removeDummyFromGrid(d));
+        this._markStructuralForcedFields();
+
+        // Neuaufbau mit eigenem, leerem Stapel: Muss über den Ausgangszustand
+        // hinaus zurückgegangen werden, ist der Versuch gescheitert
+        this.stack = [];
+        this.excluded = new Set();
+        this.exhausted = false;
+        this.preferLongWords = target.kind === "short";
+        this.silent = true;
+        let steps = 0;
+        while (
+          steps < this.optimizeRefillSteps &&
+          !this.gridIsFinished() &&
+          !this.exhausted
+        ) {
+          this._searchStep();
+          steps++;
+        }
+        this.preferLongWords = false;
+        this.silent = false;
+        this.exhausted = false;
+
+        let improved = false;
+        if (this.gridIsFinished()) {
+          let after = this._getLayoutQuality();
+          improved =
+            after.bigCells <= qualityBefore.bigCells &&
+            this._layoutPenalty(after) < penaltyBefore;
+        }
+        if (improved) {
+          this.stack = [];
+        } else {
+          this._restoreState(snapshot);
+          this.stack = savedStack;
+        }
+        return {
+          improved: improved,
+          removed: region.length,
+          steps: steps,
+          box: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
+        };
+      }
+
+      // ---- Reparaturen ----
+      // Manche Konflikte lassen sich mit einem kleinen Umbau bestehender
+      // Wörter lösen, statt per Backtracking zurückzugehen. Ein solcher Umbau
+      // ist eine eigene Ebene im Stapel (kind "repair"), ihre Kandidaten sind
+      // die möglichen Umbauten. Führt ein Umbau später in eine Sackgasse,
+      // nimmt das Backtracking ihn zurück und probiert den nächsten. Sind alle
+      // gescheitert, geht es darunter ganz normal weiter zurück.
+
+      // Reparatur-Ebene für einen Konflikt, oder null, wenn es keinen
+      // passenden Umbau gibt. Zuerst kommen die gezielten Umbauten für
+      // Randfelder bzw. tote Pflicht-Hinweisfelder, danach das Umformen eines
+      // beteiligten Wortes.
+      _createRepairFrame(conflict) {
+        if (!conflict.fields || conflict.type === "noPosition") {
+          return null;
+        }
+        let field = conflict.fields[0];
+        let candidates = [];
+        if (conflict.type === "edges") {
+          candidates = this._getEdgeRepairs(field);
+        } else if (conflict.type === "deadField") {
+          candidates = this._getMoveRepairs(field);
+        }
+        candidates = candidates.concat(this._getReshapeRepairs(conflict));
+        if (candidates.length === 0) {
+          return null;
+        }
+        return this._newFrame("repair", field, candidates);
+      }
+
+      // Wendet einen Umbau an. Liefert eine Beschreibung oder null, wenn er
+      // nicht möglich ist (der Aufrufer stellt dann den Snapshot wieder her).
+      // Ungültig ist ein Umbau auch, wenn er eine in diesem Zweig
+      // ausgeschlossene Position zum Hinweisfeld macht, oder wenn er zu einem
+      // Zustand führt, der auf dem aktuellen Pfad schon bestand - sonst
+      // könnten sich zwei Umbauten endlos gegenseitig aufheben.
+      _applyRepair(repair) {
+        let detail;
+        switch (repair.type) {
+          case "edge":
+            detail = this._applyEdgeRepair(repair);
+            break;
+          case "move":
+            detail = this._moveClue(repair.word, repair.dead, repair.newLength);
+            break;
+          case "reshape":
+            detail = this._applyReshapeRepair(repair);
+            break;
+        }
+        if (!detail) {
+          return null;
+        }
+        if ([...this.excluded].some((field) => field.isClue)) {
+          return null;
+        }
+        let signature = this._stateSignature();
+        if (this.stack.some((frame) => frame.signature === signature)) {
+          return null;
+        }
+        this._markStructuralForcedFields();
+        return detail;
+      }
+
+      // Kompakte Beschreibung des Zustands (Wörter und ausgeschlossene
+      // Positionen), um Wiederholungen auf dem aktuellen Pfad zu erkennen
+      _stateSignature() {
+        let words = this.dummys
+          .map((d) => `${d.x},${d.y},${d.direction},${d.length}`)
+          .sort();
+        let excluded = [...this.excluded].map((f) => `${f.x},${f.y}`).sort();
+        return words.join(";") + "|" + excluded.join(";");
+      }
+
+      // Unbefüllbares Randfeld (siehe _validateEdges): Ein angrenzendes
+      // Hinweisfeld wird aufgegeben und sein Wort, um 1 verlängert, vom
+      // Randfeld aus gestartet. Kandidaten sind die beiden Nachbarn entlang
+      // des Randes (links/rechts bzw. oben/unten), sofern ihr Wort quer zum
+      // Rand verläuft.
+      _getEdgeRepairs(field) {
+        let repairs = [];
+        if (this.excluded.has(field)) {
+          return repairs;
+        }
+        let clueAt = (x, y) => {
+          let f = this.getField(x, y);
+          return f ? f.clueFor : null;
         };
         // Das Feld zwei weiter muss die alte Hinweisfeld-Position nach außen
         // abschließen: ein bestehendes Hinweisfeld, ein reserviertes Feld
         // oder der Grid-Rand erfüllen das gleichermaßen.
-        let reservedAt = function (x, y) {
-          let field = that.getField(x, y);
-          return field === null || field.isClueOrReserved;
+        let closedAt = (x, y) => {
+          let f = this.getField(x, y);
+          return f === null || f.isClueOrReserved;
+        };
+        let add = (word, wordDirection, closed, direction) => {
+          if (
+            word &&
+            word.direction === wordDirection &&
+            word.length < this.maxLength &&
+            closed
+          ) {
+            repairs.push({ type: "edge", field, word, direction });
+          }
         };
 
-        impossibleEdges.forEach(function (f) {
-          // Oberer Rand
-          if (f.y === 0) {
-            left = clueAt(f.x - 1, f.y);
-            right = clueAt(f.x + 1, f.y);
-            below = clueAt(f.x, f.y + 2);
-
-            if (
-              left &&
-              left.direction === "down" &&
-              left.length < that.maxLength &&
-              reservedAt(f.x - 2, f.y)
-            ) {
-              fixes.push({ field: f, replace: left, direction: "leftdown" });
-            } else if (
-              right &&
-              right.direction === "down" &&
-              right.length < that.maxLength &&
-              reservedAt(f.x + 2, f.y)
-            ) {
-              fixes.push({ field: f, replace: right, direction: "rightdown" });
-            } else {
-              possible = false;
-            }
-          }
-          // Linker Rand
-          else {
-            above = clueAt(f.x, f.y - 1);
-            below = clueAt(f.x, f.y + 1);
-            right = clueAt(f.x + 2, f.y);
-            if (
-              above &&
-              above.direction === "right" &&
-              above.length < that.maxLength &&
-              reservedAt(f.x, f.y - 2)
-            ) {
-              fixes.push({ field: f, replace: above, direction: "upright" });
-            } else if (
-              below &&
-              below.direction === "right" &&
-              below.length < that.maxLength &&
-              reservedAt(f.x, f.y + 2)
-            ) {
-              fixes.push({ field: f, replace: below, direction: "downright" });
-            } else {
-              possible = false;
-            }
-          }
-        });
-
-        if (possible) {
-          let replacedDummys = new Set();
-          let descriptions = [];
-          fixes.forEach(function (fix) {
-            // Mehrere unmögliche Felder können denselben Dummy ersetzen wollen (z.B. ein
-            // Hinweisfeld am linken Rand zwischen zwei unmöglichen Feldern). Nur der erste
-            // Fix wird angewendet, verbleibende unmögliche Felder werden beim nächsten
-            // step()-Aufruf über _findNextFix() erneut erkannt.
-            if (replacedDummys.has(fix.replace)) {
-              return;
-            }
-            replacedDummys.add(fix.replace);
-
-            let oldX = fix.replace.x,
-              oldY = fix.replace.y,
-              oldDirection = fix.replace.direction,
-              oldLength = fix.replace.length;
-
-            let index = that.dummys.indexOf(fix.replace);
-            that.removeDummyFromGrid(fix.replace);
-            let newDummy = new Dummy(fix.field.x, fix.field.y, that);
-            newDummy.shape(false, fix.direction, fix.replace.length + 1);
-
-            if (newDummy.shaped) {
-              descriptions.push(
-                `Wort (${oldX},${oldY}) "${oldDirection}" Länge ${oldLength} ersetzt durch (${newDummy.x},${newDummy.y}) "${newDummy.direction}" Länge ${newDummy.length}`,
-              );
-            } else {
-              // Fix nicht möglich: ursprünglichen Dummy an seiner alten Position in der
-              // Reihenfolge wiederherstellen (relevant für _pickBacktrackTarget)
-              that.addDummyToGrid(fix.replace);
-              that.dummys.splice(that.dummys.indexOf(fix.replace), 1);
-              that.dummys.splice(index, 0, fix.replace);
-            }
-          });
-          // Wurde kein Fix angewendet, muss der Aufrufer per Backtracking reagieren
-          return descriptions.length > 0 ? descriptions.join("; ") : false;
+        let x = field.x,
+          y = field.y;
+        // Oberer Rand
+        if (y === 0) {
+          add(clueAt(x - 1, y), "down", closedAt(x - 2, y), "leftdown");
+          add(clueAt(x + 1, y), "down", closedAt(x + 2, y), "rightdown");
         }
-        return false;
+        // Linker Rand
+        else {
+          add(clueAt(x, y - 1), "right", closedAt(x, y - 2), "upright");
+          add(clueAt(x, y + 1), "right", closedAt(x, y + 2), "downright");
+        }
+        return repairs;
       }
 
-      // Liefert das Pflicht-Hinweisfeld, auf dem aktuell kein Wort mehr möglich
-      // ist (gleiche Auswahl wie bisher in der Platzierungsphase), oder null.
-      _getDeadForcedField() {
-        let probes = this._getForcedDummyLocations().map(
-          (field) => new Dummy(field.x, field.y, this),
-        );
-        probes.sort((a, b) => a.possibilities.length - b.possibilities.length);
-        if (probes.length > 0 && probes[0].possibilities.length === 0) {
-          return this.getField(probes[0].x, probes[0].y);
+      _applyEdgeRepair(repair) {
+        let before = this._describeDummy(repair.word);
+        let length = repair.word.length + 1;
+        this.removeDummyFromGrid(repair.word);
+        let dummy = new Dummy(repair.field.x, repair.field.y, this);
+        if (!dummy.shape(repair.direction, length)) {
+          return null;
         }
-        return null;
+        return `Wort ${before} ersetzt durch ${this._describeDummy(dummy)}`;
+      }
+
+      // Umformen: Ein Wort auf oder direkt neben einem Konfliktfeld behält sein
+      // Hinweisfeld, bekommt aber eine andere Richtung/Länge. Kandidaten sind
+      // alle dort möglichen anderen Formen der beteiligten Wörter - jüngste
+      // Wörter zuerst, je Wort zuerst gleiche Richtung mit möglichst kleiner
+      // Längenänderung, danach die übrigen Formen nach Bewertung. Formen, die
+      // ein Wort neu auf 2-3 Buchstaben kürzen, kommen ganz ans Ende: Kürzen
+      // schafft fast immer Platz und würde sonst zu sehr vielen kurzen
+      // Wörtern führen.
+      _getReshapeRepairs(conflict) {
+        let fields = conflict.fields;
+        let primary = `${conflict.type}:${fields[0].x},${fields[0].y}`;
+        let words = new Set();
+        let addFrom = (field) => {
+          [field.clueFor, field.dummyHorizontal, field.dummyVertical].forEach(
+            (dummy) => dummy && words.add(dummy),
+          );
+          field.forcedBy.forEach((dummy) => {
+            if (dummy instanceof Dummy) {
+              words.add(dummy);
+            }
+          });
+        };
+        fields.forEach((field) => {
+          addFrom(field);
+          field.getAdjacentFields().forEach(addFrom);
+        });
+
+        let ordered = [...words]
+          .filter((word) => this.dummys.indexOf(word) !== -1)
+          .sort((a, b) => this.dummys.indexOf(b) - this.dummys.indexOf(a));
+        let problems = this._getProblemSet();
+        let snapshot = this._snapshotState();
+        let repairs = [];
+        let shortRepairs = [];
+        ordered.forEach((word) => {
+          let direction = word.direction;
+          let length = word.length;
+          this.removeDummyFromGrid(word);
+          let shapes = new Dummy(word.x, word.y, this).possibilities.filter(
+            (p) => p.direction !== direction || p.length !== length,
+          );
+          this._restoreState(snapshot);
+
+          let distance = (p) =>
+            p.direction === direction ? Math.abs(p.length - length) : Infinity;
+          // stabil sortiert: bei Gleichstand bleibt die Score-Reihenfolge
+          shapes.sort((a, b) => {
+            let da = distance(a);
+            let db = distance(b);
+            return da === db ? 0 : da < db ? -1 : 1;
+          });
+          shapes.forEach((p) => {
+            let repair = {
+              type: "reshape",
+              word: word,
+              direction: p.direction,
+              length: p.length,
+              problems: problems,
+              primary: primary,
+            };
+            if (p.length <= 3 && length > 3) {
+              shortRepairs.push(repair);
+            } else {
+              repairs.push(repair);
+            }
+          });
+        });
+        return repairs.concat(shortRepairs);
+      }
+
+      // Gilt nur, wenn danach weniger Probleme im Grid sind als vorher und
+      // keines neu dazugekommen ist. So kann Umformen nie ein Problem nur an
+      // eine andere Stelle schieben.
+      _applyReshapeRepair(repair) {
+        let before = this._describeDummy(repair.word);
+        // Die Form wurde im exakt gleichen Zustand ermittelt (Snapshot der
+        // Ebene), muss also nicht erneut geprüft werden
+        this.removeDummyFromGrid(repair.word);
+        repair.word.restoreShape(repair.direction, repair.length);
+        let after = this._getProblemSet(repair.problems, repair.primary);
+        if (after === null || after.size >= repair.problems.size) {
+          return null;
+        }
+        return `Wort ${before} umgeformt zu "${repair.direction}" Länge ${repair.length}`;
+      }
+
+      // Alle aktuell offenen Probleme im Grid als Menge von Schlüsseln
+      // ("Art:x,y"), zum Vergleich vor/nach einem Umbau. Mit `allowed` wird
+      // abgebrochen und null geliefert, sobald ein Problem auftaucht, das
+      // dort nicht enthalten ist, ebenso wenn das Problem `primary` (der
+      // Konflikt, für den repariert wird) noch besteht. Diese Art wird
+      // deshalb zuerst geprüft, die teuren Prüfungen am Ende.
+      _getProblemSet(allowed, primary) {
+        let keys = new Set();
+        let checks = [
+          ["excluded", () =>
+            [...this.excluded].filter((f) => f.isEmpty && f.reserved)],
+          ["cornerClue", () => this._getForbiddenForcedFields()],
+          ["blocked", () => this._getBlockedFields()],
+          ["edges", () => this._validateEdges()],
+          ["constraints", () => this._getDirectionConstraints()],
+        ];
+        if (
+          this.controller
+            .getView()
+            .getModel("settings")
+            .getProperty("/adjClueLimitOn")
+        ) {
+          checks.push(["clueClumps", () => this._validateClueClumps().flat()]);
+        }
+        checks.push(["deadField", () => this._getDeadForcedFields()]);
+        if (primary) {
+          let primaryType = primary.split(":")[0];
+          checks.sort((a, b) => (b[0] === primaryType) - (a[0] === primaryType));
+        }
+
+        for (const [type, getFields] of checks) {
+          for (const field of getFields()) {
+            let key = `${type}:${field.x},${field.y}`;
+            if ((allowed && !allowed.has(key)) || key === primary) {
+              return null;
+            }
+            keys.add(key);
+          }
+        }
+        return keys;
       }
 
       // Alle Pflicht-Hinweisfelder, auf denen aktuell kein Wort möglich ist
@@ -582,37 +1386,34 @@ sap.ui.define(
         return this._getDeadForcedFields().some((f) => !before.dead.has(f));
       }
 
-      // Versucht, ein bestehendes Wort so zu verschieben und zu verlängern,
-      // dass das tote Pflicht-Hinweisfeld zu seinem neuen Hinweisfeld wird.
-      // Gesucht wird vom toten Feld aus nach rechts bzw. unten das erste
-      // Hinweisfeld; in Frage kommt es nur, wenn sein Wort in derselben Linie
-      // verläuft ("right" bzw. "down") - dann wird das alte Hinweisfeld zum
-      // Buchstaben des verlängerten Wortes. Liefert eine Beschreibung oder
-      // null (Grid unverändert).
-      _tryMoveClueToDeadField(dead) {
-        let candidates = [
+      // Pflicht-Hinweisfeld ohne Möglichkeit: Ein bestehendes Wort wird so
+      // verschoben und verlängert, dass das tote Feld zu seinem neuen
+      // Hinweisfeld wird (siehe _moveClue). Gesucht wird vom toten Feld aus
+      // nach rechts bzw. unten das erste Hinweisfeld; in Frage kommt es nur,
+      // wenn sein Wort in derselben Linie verläuft ("right" bzw. "down") -
+      // dann wird das alte Hinweisfeld zum Buchstaben des verlängerten Wortes.
+      _getMoveRepairs(dead) {
+        let repairs = [];
+        [
           { stepX: 1, stepY: 0, direction: "right" },
           { stepX: 0, stepY: 1, direction: "down" },
-        ];
-        for (const c of candidates) {
+        ].forEach((c) => {
           let clueField = this._findFirstClue(dead.x, dead.y, c.stepX, c.stepY);
           if (!clueField || clueField.clueFor.direction !== c.direction) {
-            continue;
+            return;
           }
-          let word = clueField.clueFor;
-          let distance = c.stepX
-            ? clueField.x - dead.x
-            : clueField.y - dead.y;
-          let newLength = word.length + distance;
-          if (newLength > this.maxLength) {
-            continue;
+          let distance = c.stepX ? clueField.x - dead.x : clueField.y - dead.y;
+          let newLength = clueField.clueFor.length + distance;
+          if (newLength <= this.maxLength) {
+            repairs.push({
+              type: "move",
+              word: clueField.clueFor,
+              dead: dead,
+              newLength: newLength,
+            });
           }
-          let result = this._moveClue(word, dead, newLength);
-          if (result) {
-            return result;
-          }
-        }
-        return null;
+        });
+        return repairs;
       }
 
       // Erstes Hinweisfeld ab (x,y) in Richtung (stepX,stepY). Bricht an einem
@@ -671,7 +1472,7 @@ sap.ui.define(
         }
 
         let moved = new Dummy(dead.x, dead.y, this);
-        moved.shape(false, oldDirection, newLength);
+        moved.shape(oldDirection, newLength);
         if (!moved.shaped || this._createdNewProblem(problemsBefore)) {
           return rollback();
         }
@@ -791,7 +1592,12 @@ sap.ui.define(
           direction: dummy.direction,
           length: dummy.length,
         }));
-        return { fields: fields, dummys: dummys, order: this.dummys.slice() };
+        return {
+          fields: fields,
+          dummys: dummys,
+          order: this.dummys.slice(),
+          excluded: new Set(this.excluded),
+        };
       }
 
       _restoreState(snapshot) {
@@ -811,6 +1617,7 @@ sap.ui.define(
           s.dummy.length = s.length;
         });
         this.dummys = snapshot.order.slice();
+        this.excluded = new Set(snapshot.excluded);
         this._evaluateGrid();
       }
 
@@ -1774,27 +2581,62 @@ sap.ui.define(
         }
       }
 
+      // Reine Berechnung, wird bei jeder Bewertung einer Wortform aufgerufen.
+      // Die Anzeige im UI aktualisiert _publishAverageWordLength() einmal pro
+      // Step: setProperty im Settings-Model prüft jedes Mal alle Bindings.
       _getCurrentAverageWordLength() {
         let totalLength = 0;
         for (let i = 0; i < this.dummys.length; i++) {
           totalLength += this.dummys[i].length;
         }
-        let average = totalLength / this.dummys.length;
+        return totalLength / this.dummys.length;
+      }
+
+      _publishAverageWordLength() {
         this.controller
           .getView()
           .getModel("settings")
-          .setProperty("/currentAverageWordLength", average);
-        return average;
+          .setProperty(
+            "/currentAverageWordLength",
+            this._getCurrentAverageWordLength(),
+          );
       }
 
+      // Kennzahlen und Score jedes Feldes. Läuft nach jeder Änderung am Grid
+      // und ist daher bewusst als ein einziger Durchlauf ohne Hilfslisten
+      // geschrieben: die vier direkten Nachbarn werden je Feld nur einmal
+      // betrachtet (gleiche Werte wie _getAdjEdges/_getAdjClues/
+      // _getAdjBlocked/_getAdjLetters).
       _evaluateGrid() {
         let that = this;
-        this.grid.forEach(function (row) {
+        let grid = this.grid;
+        let width = this.width;
+        let height = this.height;
+        grid.forEach(function (row) {
           row.forEach(function (field) {
-            let edges = that._getAdjEdges(field);
-            let clues = that._getAdjClues(field);
-            let blocked = that._getAdjBlocked(field);
-            let letters = that._getAdjLetters(field);
+            let x = field.x;
+            let y = field.y;
+            let edges =
+              (x === 0 || x === width - 1 ? 1 : 0) +
+              (y === 0 || y === height - 1 ? 1 : 0);
+            let clues = 0;
+            let blocked = 0;
+            let letters = 0;
+            let count = (neighbor) => {
+              if (neighbor.isClue) {
+                clues++;
+                blocked++;
+              } else if (neighbor.reserved) {
+                blocked++;
+              }
+              if (neighbor.isLetter) {
+                letters++;
+              }
+            };
+            if (x > 0) count(row[x - 1]);
+            if (x < width - 1) count(row[x + 1]);
+            if (y > 0) count(grid[y - 1][x]);
+            if (y < height - 1) count(grid[y + 1][x]);
             let score = 0;
 
             score += letters * 0.2;
@@ -1964,66 +2806,13 @@ sap.ui.define(
         return arrows;
       }
 
-      _shapeFirstDummy() {
-        let settings = this.controller.getView().getModel("settings");
-        let x = settings.getProperty("/firstWordX");
-        let y = settings.getProperty("/firstWordY");
-
-        let length = settings.getProperty("/firstWordLength");
-        let direction = settings.getProperty("/firstWordDirection");
-
-        let maxStartY = settings.getProperty("/height") - 5;
-        let maxStartX = settings.getProperty("/width") - 5;
-
-        maxStartX = maxStartX < 0 ? 0 : maxStartX;
-        maxStartY = maxStartY < 0 ? 0 : maxStartY;
-
-        x = x > maxStartX ? maxStartX : x;
-        y = y > maxStartY ? maxStartY : y;
-
-        // Maximal mögliche Länge ausgehend vom Hinweisfeld (x/y) in die
-        // gegebene Richtung bis zum Rand des Grids
-        let maxFittingLength;
-        switch (direction) {
-          case "right":
-            maxFittingLength = this.width - (x + 1);
-            break;
-          case "rightdown":
-          case "leftdown":
-            maxFittingLength = this.height - y;
-            break;
-          case "down":
-            maxFittingLength = this.height - (y + 1);
-            break;
-          case "downright":
-          case "upright":
-            maxFittingLength = this.width - x;
-            break;
-        }
-        length = length > maxFittingLength ? maxFittingLength : length;
-
-        let dummy = new Dummy(x, y, this);
-        dummy.shape(false, direction, length);
-        // Gewünschte Form ist nicht möglich (z.B. Richtung an dieser Position nicht
-        // erlaubt) - dann die beste verfügbare Möglichkeit nehmen
-        if (!dummy.shaped) {
-          dummy.shape();
-        }
-      }
-
       getRandomInt(min, max) {
-        min = Math.ceil(min);
-        max = Math.floor(max);
-        return Math.floor(Math.random() * (max - min + 1)) + min;
-      }
-
-      removeLastWord() {
-        this.removeDummyFromGrid(this.dummys[this.dummys.length - 1]);
-        this.updateGrid();
+        return this.random.int(min, max);
       }
 
       updateGrid() {
         this._evaluateGrid();
+        this._publishAverageWordLength();
         this.controller.setGrid(this.getGrid());
         this.controller.resetArrows();
         this.controller.addArrows();

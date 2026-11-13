@@ -62,11 +62,6 @@ sap.ui.define(
         this.gridGenerator.step();
       },
 
-      removeLastWord() {
-        this.gridGenerator.removeLastWord();
-        this.addArrows();
-      },
-
       resetArrows() {
         let oVBox = this.getView().byId("VBoxKWR");
         let rows = oVBox.getItems();

@@ -146,9 +146,6 @@
                         <Button
                             text="Step x10"
                             press=".step10" />
-                        <Button
-                            text="Remove"
-                            press=".removeLastWord" />
                     </HBox>
                 </form:content>
             </form:SimpleForm>
