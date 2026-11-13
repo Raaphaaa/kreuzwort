@@ -74,6 +74,12 @@ sap.ui.define(
         return this.dummys[this.dummys.length - 1];
       }
 
+      // In der 2x2-Ecke unten rechts dürfen keine Hinweisfelder liegen: für
+      // die Felder dort könnten meist keine Wörter mehr gebildet werden.
+      isClueForbidden(x, y) {
+        return x >= this.width - 2 && y >= this.height - 2;
+      }
+
       // Der Feld-Zustand (Inhalt, Marker, abgeleitete Flags) wird in der
       // Field-Klasse verwaltet. Für Marker, die aus der Grid-Struktur selbst
       // entstehen (nicht an einen einzelnen Dummy gebunden), wird
@@ -91,10 +97,16 @@ sap.ui.define(
         return field.isForcedByOtherThan(this._structuralForceKey);
       }
 
-      // Grid ist fertig, wenn kein Feld mehr leer ist, also jedes Feld ein Hinweis-
-      // oder Buchstabenfeld ist
+      // Grid ist fertig, wenn kein Feld mehr leer ist UND jedes Buchstabenfeld
+      // horizontal und vertikal von einem Wort gekreuzt wird - außer die
+      // fehlende Richtung ist an dieser Stelle blockiert. Letzteres prüft
+      // _getDirectionConstraints() (liefert nur Felder, bei denen die fehlende
+      // Richtung tatsächlich noch möglich wäre).
       gridIsFinished() {
-        return this.grid.every((row) => row.every((field) => !field.isEmpty));
+        return (
+          this.grid.every((row) => row.every((field) => !field.isEmpty)) &&
+          this._getDirectionConstraints().length === 0
+        );
       }
 
       step() {
@@ -170,16 +182,32 @@ sap.ui.define(
           // mehr hier - der nächste step()-Aufruf greift die neue Markierung
           // ganz normal über _getOptionalDummyLocations() auf.
           let marked = false;
+          let emptyForbidden = [];
           for (let y = 0; y < that.height && !marked; y++) {
             for (let x = 0; x < that.width && !marked; x++) {
-              if (that.grid[y][x].isEmpty) {
-                that.grid[y][x].mark(that._structuralForceKey, {
-                  forced: false,
-                });
-                detail = `Keine markierten Positionen mehr -> Feld (${x},${y}) als neue optionale Position markiert`;
-                marked = true;
+              if (!that.grid[y][x].isEmpty) {
+                continue;
               }
+              if (that.isClueForbidden(x, y)) {
+                emptyForbidden.push(that.grid[y][x]);
+                continue;
+              }
+              that.grid[y][x].mark(that._structuralForceKey, {
+                forced: false,
+              });
+              detail = `Keine markierten Positionen mehr -> Feld (${x},${y}) als neue optionale Position markiert`;
+              marked = true;
             }
+          }
+          // Nur noch leere Felder in der 2x2-Ecke unten rechts: dort darf kein
+          // Hinweisfeld entstehen, sie müssen also über Wörter von außerhalb
+          // befüllt werden. Das verantwortliche Wort neu formen.
+          if (!marked && emptyForbidden.length > 0) {
+            let target = this._pickBacktrackTarget(emptyForbidden);
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            detail = `Nur noch leere Felder in der Ecke unten rechts (${this._describeFields(emptyForbidden)}), dort kein Hinweisfeld möglich: Wort ${before} -> ${after}`;
           }
           this._markStructuralForcedFields();
           this.updateGrid();
@@ -245,6 +273,14 @@ sap.ui.define(
           return { type: "constraints", fields: constraints };
         }
 
+        // Pflicht-Hinweisfeld in der 2x2-Ecke unten rechts: kann nie erfüllt
+        // werden, daher muss die Ursache (das Wort, das die Markierung
+        // erzwingt) neu geformt werden.
+        let forbiddenForced = this._getForbiddenForcedFields();
+        if (forbiddenForced.length > 0) {
+          return { type: "cornerClue", fields: forbiddenForced };
+        }
+
         // Experimentell: Maximale Anzahl an benachbarten (auch diagonal) liegenden Hinweisfeldern
         if (
           this.controller
@@ -268,6 +304,14 @@ sap.ui.define(
           return { type: "blocked", fields: blockedFields };
         }
 
+        // Pflicht-Hinweisfeld, auf dem kein Wort mehr möglich ist. Steht
+        // bewusst am Ende: wurde bisher erst in der Platzierungsphase
+        // behandelt, also nur wenn kein anderer Fix offen war.
+        let deadField = this._getDeadForcedField();
+        if (deadField) {
+          return { type: "deadField", field: deadField };
+        }
+
         return null;
       }
 
@@ -283,6 +327,25 @@ sap.ui.define(
             target.shape();
             let after = this._describeDummy(target);
             return `Buchstabenfeld ohne Wortmöglichkeit (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
+          }
+
+          case "deadField": {
+            let f = fix.field;
+            let moved = this._tryMoveClueToDeadField(f);
+            if (moved) {
+              return `Pflicht-Hinweisfeld (${f.x},${f.y}) ohne Möglichkeit: ${moved}`;
+            }
+            let before = this._describeDummy(this.getLastDummy());
+            this.getLastDummy().shape();
+            return `Pflicht-Hinweisfeld (${f.x},${f.y}) ohne Möglichkeit, Verschieben nicht möglich: zuletzt platziertes Wort ${before} entfernt/umgeformt`;
+          }
+
+          case "cornerClue": {
+            let target = this._pickBacktrackTarget(fix.fields);
+            let before = this._describeDummy(target);
+            target.shape();
+            let after = this._describeDummy(target);
+            return `Pflicht-Hinweisfeld in der Ecke unten rechts (${this._describeFields(fix.fields)}): Wort ${before} -> ${after}`;
           }
 
           case "clueClumps": {
@@ -384,9 +447,12 @@ sap.ui.define(
           let field = that.getField(x, y);
           return field ? field.clueFor : null;
         };
+        // Das Feld zwei weiter muss die alte Hinweisfeld-Position nach außen
+        // abschließen: ein bestehendes Hinweisfeld, ein reserviertes Feld
+        // oder der Grid-Rand erfüllen das gleichermaßen.
         let reservedAt = function (x, y) {
           let field = that.getField(x, y);
-          return field !== null && field.reserved;
+          return field === null || field.isClueOrReserved;
         };
 
         impossibleEdges.forEach(function (f) {
@@ -478,6 +544,323 @@ sap.ui.define(
           return descriptions.length > 0 ? descriptions.join("; ") : false;
         }
         return false;
+      }
+
+      // Liefert das Pflicht-Hinweisfeld, auf dem aktuell kein Wort mehr möglich
+      // ist (gleiche Auswahl wie bisher in der Platzierungsphase), oder null.
+      _getDeadForcedField() {
+        let probes = this._getForcedDummyLocations().map(
+          (field) => new Dummy(field.x, field.y, this),
+        );
+        probes.sort((a, b) => a.possibilities.length - b.possibilities.length);
+        if (probes.length > 0 && probes[0].possibilities.length === 0) {
+          return this.getField(probes[0].x, probes[0].y);
+        }
+        return null;
+      }
+
+      // Alle Pflicht-Hinweisfelder, auf denen aktuell kein Wort möglich ist
+      _getDeadForcedFields() {
+        return this._getForcedDummyLocations().filter(
+          (field) => new Dummy(field.x, field.y, this).possibilities.length === 0,
+        );
+      }
+
+      // Zustand der offenen Probleme vor einer Reparatur, zum Vergleich mit
+      // _createdNewProblem()
+      _problemsBefore() {
+        return { dead: new Set(this._getDeadForcedFields()) };
+      }
+
+      // true, wenn nach einer Reparatur ein totes Pflicht-Hinweisfeld existiert,
+      // das vorher nicht tot war. Eine solche Reparatur verschiebt das Problem
+      // nur und führt sonst zu Schleifen. (Neue Buchstabenfelder ohne
+      // Kreuzungsmöglichkeit werden bewusst NICHT geprüft: das hat im Test
+      // nützliche Verschiebungen verhindert, die der constraints-Fix danach
+      // ohnehin auflöst.)
+      _createdNewProblem(before) {
+        return this._getDeadForcedFields().some((f) => !before.dead.has(f));
+      }
+
+      // Versucht, ein bestehendes Wort so zu verschieben und zu verlängern,
+      // dass das tote Pflicht-Hinweisfeld zu seinem neuen Hinweisfeld wird.
+      // Gesucht wird vom toten Feld aus nach rechts bzw. unten das erste
+      // Hinweisfeld; in Frage kommt es nur, wenn sein Wort in derselben Linie
+      // verläuft ("right" bzw. "down") - dann wird das alte Hinweisfeld zum
+      // Buchstaben des verlängerten Wortes. Liefert eine Beschreibung oder
+      // null (Grid unverändert).
+      _tryMoveClueToDeadField(dead) {
+        let candidates = [
+          { stepX: 1, stepY: 0, direction: "right" },
+          { stepX: 0, stepY: 1, direction: "down" },
+        ];
+        for (const c of candidates) {
+          let clueField = this._findFirstClue(dead.x, dead.y, c.stepX, c.stepY);
+          if (!clueField || clueField.clueFor.direction !== c.direction) {
+            continue;
+          }
+          let word = clueField.clueFor;
+          let distance = c.stepX
+            ? clueField.x - dead.x
+            : clueField.y - dead.y;
+          let newLength = word.length + distance;
+          if (newLength > this.maxLength) {
+            continue;
+          }
+          let result = this._moveClue(word, dead, newLength);
+          if (result) {
+            return result;
+          }
+        }
+        return null;
+      }
+
+      // Erstes Hinweisfeld ab (x,y) in Richtung (stepX,stepY). Bricht an einem
+      // leeren, reservierten Feld ab (das muss selbst Hinweisfeld werden und
+      // kann nicht zum Buchstaben des verschobenen Wortes werden).
+      _findFirstClue(x, y, stepX, stepY) {
+        let field = this.getField(x + stepX, y + stepY);
+        while (field) {
+          if (field.isClue) {
+            return field;
+          }
+          if (field.isEmpty && field.reserved) {
+            return null;
+          }
+          field = this.getField(field.x + stepX, field.y + stepY);
+        }
+        return null;
+      }
+
+      // Verschiebt das Hinweisfeld von `word` auf `dead` (gleiche Richtung,
+      // `newLength`). Wörter, die ein Feld des verschobenen Wortes als
+      // Pflicht-Hinweisfeld halten (forcedBy), werden vorher so verlängert,
+      // dass sie durch dieses Feld hindurchlaufen. Schlägt ein Teil fehl,
+      // wird alles zurückgerollt.
+      _moveClue(word, dead, newLength) {
+        let snapshot = this._snapshotState();
+        let problemsBefore = this._problemsBefore();
+        let oldDirection = word.direction;
+        let oldDescription = this._describeDummy(word);
+
+        let rollback = () => {
+          this._restoreState(snapshot);
+          return null;
+        };
+
+        this.removeDummyFromGrid(word);
+
+        // Felder, die das verschobene Wort belegen würde
+        let path = [];
+        for (let i = 1; i <= newLength; i++) {
+          let field =
+            oldDirection === "right"
+              ? this.getField(dead.x + i, dead.y)
+              : this.getField(dead.x, dead.y + i);
+          if (!field) {
+            return rollback();
+          }
+          path.push(field);
+        }
+
+        // Wörter, die eines dieser Felder als Pflicht-Hinweisfeld halten, so
+        // verlängern, dass sie hindurchlaufen (inkl. Folgeverlängerungen)
+        let extended = this._extendToCover(this._dummyOwnersOf(path));
+        if (extended === null) {
+          return rollback();
+        }
+
+        let moved = new Dummy(dead.x, dead.y, this);
+        moved.shape(false, oldDirection, newLength);
+        if (!moved.shaped || this._createdNewProblem(problemsBefore)) {
+          return rollback();
+        }
+
+        let extras = extended.map((e) => `; dafür ${e}`).join("");
+        return `Wort ${oldDescription} verschoben nach (${dead.x},${dead.y}), Länge ${newLength}${extras}`;
+      }
+
+      // Ordnet jedem Wort, das eines der Felder als Pflicht-Hinweisfeld hält,
+      // die betroffenen Felder zu (Map Dummy -> Set von Feldern).
+      _dummyOwnersOf(fields) {
+        let owners = new Map();
+        fields.forEach((field) => {
+          field.forcedBy.forEach((owner) => {
+            if (!(owner instanceof Dummy)) {
+              return;
+            }
+            if (!owners.has(owner)) {
+              owners.set(owner, new Set());
+            }
+            owners.get(owner).add(field);
+          });
+        });
+        return owners;
+      }
+
+      // Verlängert jedes Wort in `required` (Map Dummy -> Felder) so, dass es
+      // durch alle zugeordneten Felder hindurchläuft. Werden dabei neue Felder
+      // belegt, die ein anderes Wort als Pflicht-Hinweisfeld hält, muss auch
+      // dieses Wort verlängert werden - bis keine solchen Felder mehr übrig
+      // sind. Liefert die Beschreibungen der Verlängerungen oder null, wenn
+      // ein betroffenes Wort nicht passend verlängert werden kann. Bei null
+      // muss der Aufrufer den Zustand zurückrollen.
+      _extendToCover(required) {
+        let descriptions = [];
+        for (let round = 0; round < 50; round++) {
+          let next = null;
+          for (const [dummy, cells] of required) {
+            if (![...cells].every((cell) => this._wordCovers(dummy, cell))) {
+              next = dummy;
+              break;
+            }
+          }
+          if (!next) {
+            return descriptions;
+          }
+
+          let description = this._describeDummy(next);
+          let oldFields = new Set(this._wordFields(next));
+          let newLength = this._lengthToCover(next, [...required.get(next)]);
+          if (newLength === null) {
+            return null;
+          }
+          this.removeDummyFromGrid(next);
+          next.restoreShape(next.direction, newLength);
+          descriptions.push(`Wort ${description} verlängert auf ${newLength}`);
+
+          let newFields = this._wordFields(next).filter((f) => !oldFields.has(f));
+          this._dummyOwnersOf(newFields).forEach((cells, owner) => {
+            if (owner === next) {
+              return;
+            }
+            if (!required.has(owner)) {
+              required.set(owner, new Set());
+            }
+            cells.forEach((cell) => required.get(owner).add(cell));
+          });
+        }
+        return null;
+      }
+
+      // Buchstabenfelder eines (geformten) Wortes
+      _wordFields(dummy) {
+        let fields = [];
+        for (let i = 0; i < dummy.length; i++) {
+          fields.push(
+            dummy.horizontal
+              ? this.getField(dummy.startX + i, dummy.startY)
+              : this.getField(dummy.startX, dummy.startY + i),
+          );
+        }
+        return fields;
+      }
+
+      _wordCovers(dummy, field) {
+        if (!dummy.shaped || this.dummys.indexOf(dummy) === -1) {
+          return false;
+        }
+        return this._wordFields(dummy).indexOf(field) !== -1;
+      }
+
+      // Sichert den kompletten Grid-Zustand (Feldinhalte, Marker, Formen und
+      // Reihenfolge der Dummys), damit ein gescheiterter Reparaturversuch exakt
+      // zurückgenommen werden kann. Ein bloßes erneutes Einsetzen der Wörter
+      // reicht dafür nicht: Marker werden dabei im dann aktuellen Grid neu
+      // berechnet und können vom ursprünglichen Stand abweichen.
+      _snapshotState() {
+        let fields = [];
+        this.grid.forEach((row) => {
+          row.forEach((field) => {
+            fields.push({
+              field: field,
+              clueFor: field.clueFor,
+              dummyHorizontal: field.dummyHorizontal,
+              dummyVertical: field.dummyVertical,
+              forcedBy: new Set(field.forcedBy),
+              markedBy: new Set(field.markedBy),
+            });
+          });
+        });
+        let dummys = this.dummys.map((dummy) => ({
+          dummy: dummy,
+          shaped: dummy.shaped,
+          startX: dummy.startX,
+          startY: dummy.startY,
+          horizontal: dummy.horizontal,
+          direction: dummy.direction,
+          length: dummy.length,
+        }));
+        return { fields: fields, dummys: dummys, order: this.dummys.slice() };
+      }
+
+      _restoreState(snapshot) {
+        snapshot.fields.forEach((s) => {
+          s.field.clueFor = s.clueFor;
+          s.field.dummyHorizontal = s.dummyHorizontal;
+          s.field.dummyVertical = s.dummyVertical;
+          s.field.forcedBy = new Set(s.forcedBy);
+          s.field.markedBy = new Set(s.markedBy);
+        });
+        snapshot.dummys.forEach((s) => {
+          s.dummy.shaped = s.shaped;
+          s.dummy.startX = s.startX;
+          s.dummy.startY = s.startY;
+          s.dummy.horizontal = s.horizontal;
+          s.dummy.direction = s.direction;
+          s.dummy.length = s.length;
+        });
+        this.dummys = snapshot.order.slice();
+        this._evaluateGrid();
+      }
+
+      // Kürzeste gültige Länge (gleiche Richtung, nur Verlängerung), mit der
+      // `dummy` durch alle `cells` hindurchläuft - oder null. Grundlage sind
+      // die tatsächlich gültigen Längen (Dummy._getValidLengths) im aktuellen
+      // Grid, ohne den Dummy selbst.
+      _lengthToCover(dummy, cells) {
+        let direction = dummy.direction;
+        let oldLength = dummy.length;
+        let start = dummy.horizontal ? dummy.startX : dummy.startY;
+        let need = Math.max(
+          ...cells.map((c) => (dummy.horizontal ? c.x : c.y)),
+        );
+        let onLine = cells.every((c) =>
+          dummy.horizontal ? c.y === dummy.startY : c.x === dummy.startX,
+        );
+        if (!onLine) {
+          return null;
+        }
+
+        this.removeDummyFromGrid(dummy);
+        let lengths = dummy._getValidLengths(direction);
+        dummy.restoreShape(direction, oldLength);
+
+        let best = null;
+        lengths.forEach((length) => {
+          if (length <= oldLength || start + length - 1 < need) {
+            return;
+          }
+          if (best === null || length < best) {
+            best = length;
+          }
+        });
+        return best;
+      }
+
+      // Felder, auf denen kein Hinweisfeld liegen darf (siehe
+      // isClueForbidden), die aber (durch ein Wort oder strukturell) als
+      // Pflicht-Hinweisfeld markiert sind.
+      _getForbiddenForcedFields() {
+        let fields = [];
+        this.grid.forEach((row) => {
+          row.forEach((field) => {
+            if (field.reserved && this.isClueForbidden(field.x, field.y)) {
+              fields.push(field);
+            }
+          });
+        });
+        return fields;
       }
 
       _getBlockedFields() {
@@ -1445,7 +1828,7 @@ sap.ui.define(
         if (x > 0 && y > 0) {
           let topleft = this.grid[y - 1][x - 1];
           if (topleft.x != field.startX && topleft.y != field.startY) {
-            if (topleft.reserved) {
+            if (topleft.isClueOrReserved) {
               bonus += 2;
             } else if (topleft.nextWordLocation) {
               bonus += 1;
@@ -1457,7 +1840,7 @@ sap.ui.define(
           if (y < this.height - 1 && x > 0) {
             let bottomleft = this.grid[y + 1][x - 1];
             if (bottomleft.x != field.startX && bottomleft.y != field.startY) {
-              if (bottomleft.reserved) {
+              if (bottomleft.isClueOrReserved) {
                 bonus += 1;
               } else if (bottomleft.nextWordLocation) {
                 bonus += 0.5;
@@ -1469,7 +1852,7 @@ sap.ui.define(
           if (x < this.width - 1 && y > 0) {
             let topright = this.grid[y - 1][x + 1];
             if (topright.x != field.startX && topright.y != field.startY) {
-              if (topright.reserved) {
+              if (topright.isClueOrReserved) {
                 bonus += 1;
               } else if (topright.nextWordLocation) {
                 bonus += 0.5;
@@ -1688,170 +2071,114 @@ sap.ui.define(
       }
 
       _markForcedWordLocations(dummy) {
-        // Visualization in the comments:
-        //    C: Clue Field; if no clue field is given, the position is not important and can be ignored
-        //    WORD: current dummy word in <horizontal> orientation and its
-        //          placement compared to the clue field
-        //    #: Location that gets marked as a possible location for the next word
+        this._getForcedMarkerPositions(dummy).forEach((field) => {
+          field.mark(dummy, { forced: true });
+        });
+      }
 
-        // Vocuabulary:
-        //    marker: Describes a field, that is marked as a possible location for the next word. If in a
-        //            certain position, there has to be a clue/word placed in that spot, indicated by <reserved>
-        let that = this;
-        if (dummy.horizontal) {
-          // Word and clue not in a straight line, marker 2 fields next to the clue as a possible location
-          if (dummy.y != dummy.startY) {
-            // |#| | | |
-            // |W|O|R|D|
-            // |C| | | |
-            if (dummy.y > dummy.startY) {
-              if (
-                that.grid[dummy.y - 2] &&
-                that.grid[dummy.y - 2][dummy.x].isEmpty
-              ) {
-                that.grid[dummy.y - 2][dummy.x].mark(dummy, { forced: true });
-              }
+      // Liefert die Felder, die ein Wort mit der Form `w` (x, y, startX,
+      // startY, horizontal, direction, length) als Pflicht-Hinweisfeld
+      // markiert. Reine Berechnung ohne Seiteneffekte - wird sowohl beim
+      // tatsächlichen Markieren (_markForcedWordLocations) als auch beim
+      // Prüfen möglicher Wortformen (Dummy._getValidLengths) verwendet, damit
+      // beides nie auseinanderläuft.
+      //
+      // Visualisierung in den Kommentaren:
+      //    C: Hinweisfeld
+      //    WORD: das Wort in horizontaler Ausrichtung
+      //    #: Feld, das als Pflicht-Hinweisfeld markiert wird
+      _getForcedMarkerPositions(w) {
+        let positions = [];
+        let add = (x, y, onlyIfEmpty) => {
+          let field = this.getField(x, y);
+          if (!field || (onlyIfEmpty && !field.isEmpty)) {
+            return;
+          }
+          positions.push(field);
+        };
+
+        if (w.horizontal) {
+          // Hinweisfeld und Wort nicht in einer Linie: Feld 2 neben dem
+          // Hinweisfeld
+          // |#| | | |        |C| | | |
+          // |W|O|R|D|        |W|O|R|D|
+          // |C| | | |        |#| | | |
+          if (w.y != w.startY) {
+            if (w.y > w.startY) {
+              add(w.x, w.y - 2, true);
             } else {
-              // |C| | | |
-              // |W|O|R|D|
-              // |#| | | |
-              if (
-                that.grid[dummy.y + 2] &&
-                that.grid[dummy.y + 2][dummy.x].isEmpty
-              ) {
-                // experimentell TODO:evtl. forced: false setzen
-                that.grid[dummy.y + 2][dummy.x].mark(dummy, { forced: true });
-              }
+              add(w.x, w.y + 2, true);
             }
           }
 
-          if (that.grid[dummy.startY][dummy.startX + dummy.length]) {
-            // Field behind the word is always a marker
-            // | | | | | |
-            // |W|O|R|D|#|
-            // | | | | | |
-            that.grid[dummy.startY][dummy.startX + dummy.length].mark(dummy, {
-              forced: true,
-            });
-            if (
-              dummy.startY == 1 &&
-              that.grid[0][dummy.startX + dummy.length].isEmpty
-            ) {
-              // The word is placed in the second row. A marker has to be behind the word ('+').
-              // At the top of the grid in the first row, no words are allowed that go parallel to the border.
-              // If the field above the marker stays free, an empty field would occur since no word can be placed there.
-              // It is marked as well.
-              //  _________
-              // | | | | |#|
-              // |W|O|R|D|+|
-              // | | | | | |
-              that.grid[0][dummy.startX + dummy.length].mark(dummy, {
-                forced: true,
-              });
-            }
-          }
-          if (that.grid[dummy.startY][dummy.startX - 1]) {
-            // | | | | | |
-            // |#|W|O|R|D|
-            // | | | | | |
-
-            // Feld vor dem Wort als Pflichtfeld markieren, wenn das Hinweisfeld darüber/darunter in
-            // der Zeile liegt
-            if (dummy.startY != dummy.y) {
-              that.grid[dummy.startY][dummy.startX - 1].mark(dummy, {
-                forced: true,
-              });
-            }
-
-            if (dummy.startY == 1 && that.grid[0][dummy.startX - 1].isEmpty) {
-              // The word is placed in the second row. A marker has to be in front of the word ('+').
-              // At the top of the grid in the first row, no words are allowed that go parallel to the border.
-              // If the field above the marker stays free, an empty field would occur since no word can be placed there.
-              // It is marked as well.
-              //  _________
-              // |#| | | | |
-              // |+|W|O|R|D|
-              // | | | | | |
-              that.grid[0][dummy.startX - 1].mark(dummy, { forced: true });
+          // Feld hinter dem Wort
+          // |W|O|R|D|#|
+          let behindX = w.startX + w.length;
+          if (this.getField(behindX, w.startY)) {
+            add(behindX, w.startY, false);
+            // Wort in der zweiten Zeile: in der ersten Zeile sind keine
+            // parallelen Wörter erlaubt, das Feld darüber würde sonst leer
+            // bleiben
+            if (w.startY == 1) {
+              add(behindX, 0, true);
             }
           }
 
-          if (dummy.direction === "right") {
-            if (
-              that.grid[dummy.y + 1] &&
-              that.grid[dummy.y + 1][dummy.x].isLetter
-            ) {
-              if (
-                that.grid[dummy.y + 2] &&
-                that.grid[dummy.y + 2][dummy.x].isEmpty
-              ) {
-                that.grid[dummy.y + 2][dummy.x].mark(dummy, { forced: true });
-              }
+          // Feld vor dem Wort, wenn das Hinweisfeld darüber/darunter liegt
+          // |#|W|O|R|D|
+          if (this.getField(w.startX - 1, w.startY)) {
+            if (w.startY != w.y) {
+              add(w.startX - 1, w.startY, false);
+            }
+            if (w.startY == 1) {
+              add(w.startX - 1, 0, true);
+            }
+          }
+
+          if (w.direction === "right") {
+            let below = this.getField(w.x, w.y + 1);
+            if (below && below.isLetter) {
+              add(w.x, w.y + 2, true);
             }
           }
         }
 
-        // VERTICAL
+        // Vertikal: gleiche Logik, auf die andere Ausrichtung übertragen
         else {
-          // The word is placed vertically, the logic is the same as above but adjusted to the new orientation
-          if (dummy.x != dummy.startX) {
-            if (dummy.x > dummy.startX) {
-              if (
-                that.grid[dummy.y][dummy.x - 2] &&
-                that.grid[dummy.y][dummy.x - 2].isEmpty
-              ) {
-                that.grid[dummy.y][dummy.x - 2].mark(dummy, { forced: true });
-              }
+          if (w.x != w.startX) {
+            if (w.x > w.startX) {
+              add(w.x - 2, w.y, true);
             } else {
-              if (
-                that.grid[dummy.y][dummy.x + 2] &&
-                that.grid[dummy.y][dummy.x + 2].isEmpty
-              ) {
-                // experimentell TODO:evtl. forced: false setzen
-                that.grid[dummy.y][dummy.x + 2].mark(dummy, { forced: true });
-              }
-            }
-          }
-          if (that.grid[dummy.startY + dummy.length]) {
-            that.grid[dummy.startY + dummy.length][dummy.startX].mark(dummy, {
-              forced: true,
-            });
-            if (
-              dummy.startX == 1 &&
-              that.grid[dummy.startY + dummy.length][0].isEmpty
-            ) {
-              that.grid[dummy.startY + dummy.length][0].mark(dummy, {
-                forced: true,
-              });
+              add(w.x + 2, w.y, true);
             }
           }
 
-          if (that.grid[dummy.startY - 1]) {
-            if (dummy.startX != dummy.x) {
-              that.grid[dummy.startY - 1][dummy.startX].mark(dummy, {
-                forced: true,
-              });
-            }
-
-            if (dummy.startX == 1 && that.grid[dummy.startY - 1][0].isEmpty) {
-              that.grid[dummy.startY - 1][0].mark(dummy, { forced: true });
+          let behindY = w.startY + w.length;
+          if (this.getField(w.startX, behindY)) {
+            add(w.startX, behindY, false);
+            if (w.startX == 1) {
+              add(0, behindY, true);
             }
           }
 
-          if (dummy.direction === "down") {
-            if (
-              that.grid[dummy.y][dummy.x + 1] &&
-              that.grid[dummy.y][dummy.x + 1].isLetter
-            ) {
-              if (
-                that.grid[dummy.y][dummy.x + 2] &&
-                that.grid[dummy.y][dummy.x + 2].isEmpty
-              ) {
-                that.grid[dummy.y][dummy.x + 2].mark(dummy, { forced: true });
-              }
+          if (this.getField(w.startX, w.startY - 1)) {
+            if (w.startX != w.x) {
+              add(w.startX, w.startY - 1, false);
+            }
+            if (w.startX == 1) {
+              add(0, w.startY - 1, true);
+            }
+          }
+
+          if (w.direction === "down") {
+            let right = this.getField(w.x + 1, w.y);
+            if (right && right.isLetter) {
+              add(w.x + 2, w.y, true);
             }
           }
         }
+
+        return positions;
       }
 
       _markOptionalWordLocations(dummy) {
@@ -1865,7 +2192,8 @@ sap.ui.define(
         if (dummy.horizontal) {
           if (
             that.grid[dummy.y][dummy.x + 2] &&
-            that.grid[dummy.y][dummy.x + 2].isEmpty
+            that.grid[dummy.y][dummy.x + 2].isEmpty &&
+            !that.isClueForbidden(dummy.x + 2, dummy.y)
           ) {
             that.grid[dummy.y][dummy.x + 2].mark(dummy, { forced: false });
           }
@@ -1873,7 +2201,8 @@ sap.ui.define(
           if (
             that.grid[dummy.y + 2] &&
             that.grid[dummy.y + 2][dummy.x] &&
-            that.grid[dummy.y + 2][dummy.x].isEmpty
+            that.grid[dummy.y + 2][dummy.x].isEmpty &&
+            !that.isClueForbidden(dummy.x, dummy.y + 2)
           ) {
             that.grid[dummy.y + 2][dummy.x].mark(dummy, { forced: false });
           }
@@ -1898,7 +2227,11 @@ sap.ui.define(
                 break;
               }
             }
-            if (minY >= 0 && that.grid[minY][x].isEmpty) {
+            if (
+              minY >= 0 &&
+              that.grid[minY][x].isEmpty &&
+              !that.isClueForbidden(x, minY)
+            ) {
               that.grid[minY][x].mark(dummy, { forced: false });
             }
           }
@@ -1917,7 +2250,11 @@ sap.ui.define(
                 break;
               }
             }
-            if (minX >= 0 && that.grid[y][minX].isEmpty) {
+            if (
+              minX >= 0 &&
+              that.grid[y][minX].isEmpty &&
+              !that.isClueForbidden(minX, y)
+            ) {
               that.grid[y][minX].mark(dummy, { forced: false });
             }
           }

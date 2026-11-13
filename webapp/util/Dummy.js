@@ -94,6 +94,20 @@ sap.ui.define([], function () {
       this.generator.addDummyToGrid(this);
     }
 
+    // Setzt eine Form direkt, ohne Prüfung gegen triedPossibilities. Nur für
+    // Fälle, in denen die Form bereits anderweitig als gültig bekannt ist
+    // (Rollback auf die vorherige Form, oder eine vorab über
+    // _getValidLengths() geprüfte Länge) - nicht für normale Platzierung.
+    restoreShape(direction, length) {
+      this.startX = this._getStartX(direction);
+      this.startY = this._getStartY(direction);
+      this.horizontal = this._getHorizontal(direction);
+      this.direction = direction;
+      this.length = length;
+      this.shaped = true;
+      this.generator.addDummyToGrid(this);
+    }
+
     _refreshPossibilities() {
       let that = this;
       this.possibilities = [];
@@ -231,11 +245,33 @@ sap.ui.define([], function () {
       }
     }
 
+    // true, wenn ein Wort mit dieser Richtung/Länge über die normalen
+    // Pflicht-Marker (siehe Generator._getForcedMarkerPositions) ein
+    // Hinweisfeld an einer verbotenen Stelle erzwingen würde.
+    _wouldForceForbiddenClue(direction, length) {
+      let positions = this.generator._getForcedMarkerPositions({
+        x: this.x,
+        y: this.y,
+        startX: this._getStartX(direction),
+        startY: this._getStartY(direction),
+        horizontal: this._getHorizontal(direction),
+        direction: direction,
+        length: length,
+      });
+      return positions.some((field) =>
+        this.generator.isClueForbidden(field.x, field.y),
+      );
+    }
+
     _getPossibilityKey(possibility) {
       return possibility.direction + ":" + possibility.length;
     }
 
     _getValidDirections() {
+      if (this.generator.isClueForbidden(this.x, this.y)) {
+        return new Set();
+      }
+
       let directions = this._getDirections();
       let validDirections = new Set();
       let that = this;
@@ -369,30 +405,15 @@ sap.ui.define([], function () {
           break;
         }
 
-        // avoids the 2x2 in the bottom right corner of the grid. No future
-        // clue fields will be placed there due to this condition
-        if (
-          (direction === "right" ||
-            direction === "downright" ||
-            direction === "upright") &&
-          y >= this.generator.height - 2 &&
-          (this.generator.width - 2 == x || this.generator.width - 3 == x)
-        ) {
-          length++;
-          continue;
-        } else if (
-          (direction === "down" ||
-            direction === "rightdown" ||
-            direction === "leftdown") &&
-          x >= this.generator.width - 2 &&
-          (this.generator.height - 2 == y || this.generator.height - 3 == y)
-        ) {
-          length++;
-          continue;
-        }
-
         // continue when the current field is empty or a letter
         if (currentField.isEmpty || currentField.isLetter) {
+          // Länge nur zulassen, wenn das Wort dadurch kein Pflicht-
+          // Hinweisfeld in der 2x2-Ecke unten rechts erzwingen würde
+          let forcesForbiddenClue = that._wouldForceForbiddenClue(
+            direction,
+            length,
+          );
+
           // check, if the next field would be within the grid. IF so, that
           // field has to be checked as well
           if (x + moveX < width && y + moveY < height) {
@@ -404,13 +425,19 @@ sap.ui.define([], function () {
             // |W|O|R|D|x|
             // | | | | | |
             if (nextField.isEmpty) {
-              validLengths.push(length);
+              if (!forcesForbiddenClue) {
+                validLengths.push(length);
+              }
             } else if (nextField.isClue) {
-              validLengths.push(length);
+              if (!forcesForbiddenClue) {
+                validLengths.push(length);
+              }
               break;
             }
           } else {
-            validLengths.push(length);
+            if (!forcesForbiddenClue) {
+              validLengths.push(length);
+            }
             break;
           }
         }

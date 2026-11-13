@@ -7,7 +7,7 @@
   "maxHeight": 20,
   "minWordLength": 2,
   "maxWordLength": 8,
-  "targetAverageWordLength": 4.3,
+  "targetAverageWordLength": 5.0,
   "currentAverageWordLength": 0,
   "firstWordX": 0,
   "firstWordY": 0,
